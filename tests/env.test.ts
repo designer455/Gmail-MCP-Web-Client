@@ -92,6 +92,7 @@ describe('1. Environment Validation', () => {
       GOOGLE_CLIENT_SECRET: 'mock-secret',
       NODE_ENV: 'production',
       SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_JWKS_URL: 'https://example.supabase.co/auth/v1/.well-known/jwks.json',
     };
 
     expect(() => parseEnv(prodEnv)).toThrowError(
@@ -99,7 +100,7 @@ describe('1. Environment Validation', () => {
     );
   });
 
-  it('succeeds in production when SUPABASE_URL and SUPABASE_SECRET_KEY are provided', () => {
+  it('fails in production if SUPABASE_JWKS_URL is missing', () => {
     const prodEnv = {
       GOOGLE_CLIENT_ID: 'mock-id',
       GOOGLE_CLIENT_SECRET: 'mock-secret',
@@ -108,8 +109,26 @@ describe('1. Environment Validation', () => {
       SUPABASE_SECRET_KEY: 'mock-secret-key',
     };
 
+    expect(() => parseEnv(prodEnv)).toThrowError(
+      /SUPABASE_JWKS_URL is required in production environment/
+    );
+  });
+
+  it('succeeds in production when SUPABASE_URL, SUPABASE_SECRET_KEY, and SUPABASE_JWKS_URL are provided', () => {
+    const prodEnv = {
+      GOOGLE_CLIENT_ID: 'mock-id',
+      GOOGLE_CLIENT_SECRET: 'mock-secret',
+      NODE_ENV: 'production',
+      SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_SECRET_KEY: 'mock-secret-key',
+      SUPABASE_JWKS_URL: 'https://example.supabase.co/auth/v1/.well-known/jwks.json',
+    };
+
     const parsed = parseEnv(prodEnv);
     expect(parsed.SUPABASE_URL).toBe('https://example.supabase.co');
     expect(parsed.SUPABASE_SECRET_KEY).toBe('mock-secret-key');
+    expect(parsed.SUPABASE_JWKS_URL).toBe(
+      'https://example.supabase.co/auth/v1/.well-known/jwks.json'
+    );
   });
 });

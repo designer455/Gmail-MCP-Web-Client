@@ -3,6 +3,7 @@ import { createApp } from '../src/app.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { getTokenStore, MemoryTokenStore } from '../src/auth/token-store.js';
+import { initTestJwks, createTestJwt } from './helpers/jwt-test-helper.js';
 import type { Server } from 'node:http';
 
 describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
@@ -16,6 +17,8 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
     process.env.GOOGLE_CLIENT_ID = 'test-client-id';
     process.env.GOOGLE_CLIENT_SECRET = 'test-client-secret';
     process.env.PORT = String(PORT);
+
+    await initTestJwks();
 
     const app = createApp();
     await new Promise<void>((resolve) => {
@@ -38,10 +41,11 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
 
   // 1. POST /mcp & MCP initialization
   it('1. POST /mcp & MCP initialization succeeds via SDK client', async () => {
+    const token = await createTestJwt({ sub: 'user-init-test' });
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
       requestInit: {
         headers: {
-          Authorization: 'Bearer user-init-test',
+          Authorization: `Bearer ${token}`,
         },
       },
     });
@@ -57,11 +61,12 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
 
   // 2. GET /mcp streaming behavior & content negotiation
   it('2. GET /mcp establishes SSE stream when Accept: text/event-stream is present', async () => {
+    const token = await createTestJwt({ sub: 'user-get-stream' });
     const res = await fetch(MCP_URL, {
       method: 'GET',
       headers: {
         Accept: 'text/event-stream',
-        Authorization: 'Bearer user-get-stream',
+        Authorization: `Bearer ${token}`,
       },
     });
 
@@ -83,10 +88,11 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
 
   // 3 & 4. Tool discovery: all 7 registered Gmail tools
   it('3 & 4. Discovers exactly the 7 registered Gmail tools with complete schemas', async () => {
+    const token = await createTestJwt({ sub: 'user-tools-test' });
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
       requestInit: {
         headers: {
-          Authorization: 'Bearer user-tools-test',
+          Authorization: `Bearer ${token}`,
         },
       },
     });
@@ -119,10 +125,11 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
 
   // 5. gmail_mcp_status executes through protocol
   it('5. Executes gmail_mcp_status via protocol and returns safe diagnostic metadata', async () => {
+    const token = await createTestJwt({ sub: 'user-status-test' });
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
       requestInit: {
         headers: {
-          Authorization: 'Bearer user-status-test',
+          Authorization: `Bearer ${token}`,
         },
       },
     });
@@ -176,10 +183,11 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
 
   // 7. Authenticated request context resolution
   it('7. Resolves authenticated user identity from Authorization: Bearer header', async () => {
+    const token = await createTestJwt({ sub: 'authenticated-alice' });
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
       requestInit: {
         headers: {
-          Authorization: 'Bearer authenticated-alice',
+          Authorization: `Bearer ${token}`,
         },
       },
     });
@@ -208,17 +216,20 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
       emailAddress: 'charlie@gmail.com',
     });
 
+    const tokenCharlie = await createTestJwt({ sub: 'user-charlie' });
+    const tokenBob = await createTestJwt({ sub: 'user-bob' });
+
     const clientA = new Client({ name: 'client-a', version: '1.0.0' }, { capabilities: {} });
     await clientA.connect(
       new StreamableHTTPClientTransport(new URL(MCP_URL), {
-        requestInit: { headers: { Authorization: 'Bearer user-charlie' } },
+        requestInit: { headers: { Authorization: `Bearer ${tokenCharlie}` } },
       })
     );
 
     const clientB = new Client({ name: 'client-b', version: '1.0.0' }, { capabilities: {} });
     await clientB.connect(
       new StreamableHTTPClientTransport(new URL(MCP_URL), {
-        requestInit: { headers: { Authorization: 'Bearer user-bob' } },
+        requestInit: { headers: { Authorization: `Bearer ${tokenBob}` } },
       })
     );
 
@@ -246,10 +257,11 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
   it('9. Rejects cross-user account selection via query parameter ?userId=victim', async () => {
     // Attacker supplies ?userId=victim-user with Bearer attacker-user
     const maliciousUrl = `${MCP_URL}?userId=victim-user`;
+    const tokenAttacker = await createTestJwt({ sub: 'attacker-user' });
     const transport = new StreamableHTTPClientTransport(new URL(maliciousUrl), {
       requestInit: {
         headers: {
-          Authorization: 'Bearer attacker-user',
+          Authorization: `Bearer ${tokenAttacker}`,
         },
       },
     });
@@ -272,10 +284,11 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
 
   // 10. Gmail not connected handling
   it('10. Rejects Gmail operations with clear error when OAuth is incomplete', async () => {
+    const tokenNoOauth = await createTestJwt({ sub: 'user-no-oauth' });
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
       requestInit: {
         headers: {
-          Authorization: 'Bearer user-no-oauth',
+          Authorization: `Bearer ${tokenNoOauth}`,
         },
       },
     });
@@ -297,10 +310,11 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
 
   // 11. Invalid MCP tool call
   it('11. Returns error response when calling non-existent tool', async () => {
+    const tokenTest = await createTestJwt({ sub: 'user-test' });
     const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
       requestInit: {
         headers: {
-          Authorization: 'Bearer user-test',
+          Authorization: `Bearer ${tokenTest}`,
         },
       },
     });
@@ -382,13 +396,15 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
 
   // 14. Serverless & Stateless request behavior
   it('14. Succeeds on consecutive stateless requests without session state between invocations', async () => {
+    const tokenServerless = await createTestJwt({ sub: 'serverless-user' });
+
     // Request 1: Initialize
     const initRes = await fetch(MCP_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
-        Authorization: 'Bearer serverless-user',
+        Authorization: `Bearer ${tokenServerless}`,
       },
       body: JSON.stringify({
         jsonrpc: '2.0',
@@ -412,7 +428,7 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json, text/event-stream',
-        Authorization: 'Bearer serverless-user',
+        Authorization: `Bearer ${tokenServerless}`,
       },
       body: JSON.stringify({
         jsonrpc: '2.0',

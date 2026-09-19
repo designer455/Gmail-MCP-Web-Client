@@ -33,6 +33,7 @@
     "google-auth-library": "^9.15.1",
     "googleapis": "^146.0.0",
     "helmet": "^8.0.0",
+    "jose": "^6.2.12",
     "zod": "^3.24.2"
   },
   "devDependencies": {

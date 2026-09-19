@@ -28,11 +28,7 @@ setInterval(
  */
 export function rateLimiter(maxRequests = 120, windowMs = 60 * 1000) {
   return (req: Request, _res: Response, next: NextFunction): void => {
-    const key =
-      (req.headers['x-user-id'] as string) ||
-      (req.headers['x-forwarded-for'] as string) ||
-      req.ip ||
-      'anonymous';
+    const key = (req.headers['x-forwarded-for'] as string) || req.ip || 'anonymous';
 
     const now = Date.now();
     const record = clientRecords.get(key);

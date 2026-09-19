@@ -24,6 +24,7 @@ const envSchema = z
     PORT: z.coerce.number().default(3000),
     SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL').optional(),
     SUPABASE_SECRET_KEY: z.string().min(1, 'SUPABASE_SECRET_KEY cannot be empty').optional(),
+    SUPABASE_JWKS_URL: z.string().url('SUPABASE_JWKS_URL must be a valid URL').optional(),
   })
   .superRefine((data, ctx) => {
     if (data.NODE_ENV === 'production') {
@@ -39,6 +40,13 @@ const envSchema = z
           code: z.ZodIssueCode.custom,
           message: 'SUPABASE_SECRET_KEY is required in production environment',
           path: ['SUPABASE_SECRET_KEY'],
+        });
+      }
+      if (!data.SUPABASE_JWKS_URL) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'SUPABASE_JWKS_URL is required in production environment',
+          path: ['SUPABASE_JWKS_URL'],
         });
       }
     }
@@ -82,6 +90,9 @@ export function getEnv(): EnvConfig {
             process.env.ENCRYPTION_KEY ||
             '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
           MCP_AUTH_SECRET: process.env.MCP_AUTH_SECRET || 'test_mcp_auth_secret_key_123456789',
+          SUPABASE_JWKS_URL:
+            process.env.SUPABASE_JWKS_URL ||
+            'https://svqtutugnahwivpywysq.supabase.co/auth/v1/.well-known/jwks.json',
           NODE_ENV: 'test',
           PORT: '3000',
         }

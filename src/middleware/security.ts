@@ -27,14 +27,7 @@ export const corsMiddleware = cors({
   origin: true, // Echo origin or allow all configured origins
   credentials: true,
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: [
-    'Content-Type',
-    'Authorization',
-    'X-User-ID',
-    'Accept',
-    'Cache-Control',
-    'X-Requested-With',
-  ],
+  allowedHeaders: ['Content-Type', 'Authorization', 'Accept', 'Cache-Control', 'X-Requested-With'],
 });
 
 /**

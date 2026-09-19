@@ -6,7 +6,7 @@ import { getAuthorizationUrl } from './auth/oauth.js';
 import { handleOAuthCallback } from './auth/callback.js';
 import { getCurrentUser } from './auth/session.js';
 import { getTokenStore } from './auth/token-store.js';
-import { authMiddleware } from './middleware/auth.js';
+import { authMiddleware, requireAuthMiddleware } from './middleware/auth.js';
 import {
   securityHeaders,
   corsMiddleware,
@@ -17,8 +17,13 @@ import { rateLimiter } from './middleware/rate-limit.js';
 import { logger } from './utils/logger.js';
 import { sanitizeErrorMessage } from './utils/errors.js';
 
-export function createApp(): express.Application {
+export interface AppOptions {
+  protectMcp?: boolean;
+}
+
+export function createApp(options: AppOptions = {}): express.Application {
   const app = express();
+  const protectMcp = options.protectMcp ?? process.env.NODE_ENV === 'production';
 
   // Basic security and parsing middlewares
   app.use(securityHeaders);
@@ -235,13 +240,13 @@ export function createApp(): express.Application {
           ? `
         <p>Gmail account <strong>${credentials?.emailAddress || 'Authorized'}</strong> is connected for session <code>${user.userId}</code>.</p>
         <div style="margin-top: 1rem;">
-          <a href="/auth/login?userId=${encodeURIComponent(user.userId)}" class="btn" style="background: rgba(255,255,255,0.1); color: #fff;">Re-authorize Account</a>
+          <a href="/auth/login" class="btn" style="background: rgba(255,255,255,0.1); color: #fff;">Re-authorize Account</a>
         </div>
       `
           : `
         <p>Authorize this session to connect your Gmail mailbox. Each user's tokens are strictly isolated.</p>
         <div style="margin-top: 1.25rem;">
-          <a href="/auth/login?userId=${encodeURIComponent(user.userId)}" class="btn">Connect Gmail Account →</a>
+          <a href="/auth/login" class="btn">Connect Gmail Account →</a>
         </div>
       `
       }
@@ -353,7 +358,7 @@ export function createApp(): express.Application {
     <p>Successfully authorized Gmail access for application user <strong>${result.userId}</strong>.</p>
     <div class="email">${result.emailAddress}</div>
     <p>You can now close this tab and return to ChatGPT or your MCP client.</p>
-    <p><a href="/?userId=${encodeURIComponent(result.userId)}">← Return to Dashboard</a></p>
+    <p><a href="/">← Return to Dashboard</a></p>
   </div>
 </body>
 </html>
@@ -389,7 +394,8 @@ export function createApp(): express.Application {
 
   // Production-Ready Stateless MCP Streamable HTTP Transport endpoint
   // Handles POST (MCP JSON-RPC messages) and GET (streaming SSE connections where supported)
-  app.all('/mcp', authMiddleware, async (req: Request, res: Response) => {
+  const mcpAuth = protectMcp ? requireAuthMiddleware : authMiddleware;
+  app.all('/mcp', mcpAuth, async (req: Request, res: Response) => {
     try {
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined, // Stateless mode (no in-memory sessions / Vercel-ready)

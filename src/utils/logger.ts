@@ -14,6 +14,8 @@ export function redactSensitiveData(input: string): string {
 
   // Direct tokens / secrets
   sanitized = sanitized.replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [REDACTED]');
+  sanitized = sanitized.replace(/sb_secret_[A-Za-z0-9_-]+/gi, '[REDACTED]');
+  sanitized = sanitized.replace(/sb_publishable_[A-Za-z0-9_-]+/gi, '[REDACTED]');
   sanitized = sanitized.replace(/GOCSPX-[A-Za-z0-9_-]+/gi, '[REDACTED]');
   sanitized = sanitized.replace(/ya29\.[A-Za-z0-9_-]+/gi, '[REDACTED]');
   sanitized = sanitized.replace(/4\/[0-9A-Za-z_-]+/gi, '[REDACTED]');

@@ -68,22 +68,36 @@ A standalone, production-ready, multi-user **Gmail Model Context Protocol (MCP)*
 
 ---
 
-## 3. Multi-User Architecture & Isolation
+## 3. Cryptographically Verified Authentication & Multi-User Isolation
 
-The server provides strict multi-user credential isolation:
+The server provides strict, zero-trust cryptographic authentication and multi-user isolation:
 
 ```
-User A ───> Authorization: Bearer A ───> Supabase (User A) ───> Gmail Account A
-User B ───> Authorization: Bearer B ───> Supabase (User B) ───> Gmail Account B
-User C ───> Authorization: Bearer C ───> Supabase (User C) ───> Gmail Account C
+MCP Request
+    ↓
+Authorization: Bearer <Supabase Auth JWT>
+    ↓
+JWT Signature Verification via Supabase JWKS (ES256/RS256 with rotation cache)
+    ↓
+Claims Validation (iss, aud, exp, nbf, sub)
+    ↓
+Authenticated User Identity (`sub`)
+    ↓
+Node.js AsyncLocalStorage UserContext
+    ↓
+SupabaseTokenStore (AES-256-GCM encrypted OAuth credentials)
+    ↓
+Only Authenticated User's Gmail Mailbox (userId: "me")
 ```
 
-### Isolation Guarantees:
-- **No Client-Specified Account ID**: MCP tool schemas **never** accept `user_id`, `userId`, `account`, or `gmailAccountId`.
-- **Request Context Binding**: User identity is resolved at the middleware boundary via headers (`Authorization: Bearer <credential>`) and bound to Node's `AsyncLocalStorage`.
-- **Query Parameter Forbidding**: On `/mcp`, query parameters (`?userId=...`) are strictly ignored and never trusted for account selection.
-- **Gmail API `userId: 'me'`**: All Google API calls strictly target the authenticated OAuth client tokens belonging to that user context.
-- **Database Row Scoping**: Every Supabase query explicitly filters by `eq('user_id', currentUser.userId)`.
+### Authentication Guarantees:
+- **Cryptographic Signature Verification**: Every Bearer token is verified against the server-side Supabase JWKS endpoint (`SUPABASE_JWKS_URL`) using `jose`.
+- **Subject (`sub`) Identity**: The application user identity is exclusively derived from the cryptographically verified `sub` claim.
+- **Zero Caller-Supplied User IDs**: No tool arguments, request bodies, query parameters (`?userId=...`), or custom headers (`X-User-ID`) can supply or override user identity.
+- **Automatic JWKS Key Rotation & Caching**: Public keys are cached server-side with automatic refresh on unknown `kid` to handle key rotation without downtime.
+- **Strict Error Handling**: Expired tokens, invalid signatures, malformed headers, or missing subjects return HTTP 401 Unauthorized without leaking sensitive internals or database details.
+- **Database Row Scoping**: Every Supabase query filters strictly by `eq('user_id', currentUser.userId)`.
+- **Pre-Execution Guard**: Incomplete OAuth or unauthenticated requests are blocked before reaching Gmail tools.
 
 ---
 
@@ -96,7 +110,7 @@ The production token store persists encrypted credentials to the PostgreSQL tabl
 | Column | Type | Constraints / Details |
 |---|---|---|
 | `id` | `uuid` | Primary Key, `DEFAULT gen_random_uuid()` |
-| `user_id` | `text` | Application user identifier (indexed) |
+| `user_id` | `text` | Application user identifier (`sub` from verified Supabase JWT) |
 | `google_account_id` | `text` | Google Subject ID or email fallback |
 | `email` | `text` | Connected Gmail address (indexed) |
 | `encrypted_access_token` | `text` | AES-256-GCM encrypted access token (`iv:authTag:cipher`) |
@@ -283,7 +297,8 @@ All 7 Gmail tools execute with `userId: "me"` under the active session:
 
 ---
 
-## 14. Security Limitations & Authentication Architecture
+## 14. Authentication Hardening & Security Architecture
 
-- **Bearer Token Identity vs. Cryptographic JWTs**: In the current implementation, the `Authorization: Bearer <credential>` header acts as an application user credential token. For enterprise zero-trust multi-tenant deployments, this token should be issued and cryptographically verified as an OIDC / Supabase JWT signed with JWKS (`SUPABASE_JWKS_URL`) or an OAuth 2.0 Bearer token with server-side validation.
-- **Service Role RLS Bypass**: Server-side requests utilize `SUPABASE_SECRET_KEY` which intentionally bypasses PostgreSQL Row Level Security (RLS). Row isolation is enforced at the application layer via explicit `user_id` query scoping.
+- **Cryptographic JWT Authentication**: In Phase 4, the placeholder Bearer token mechanism has been replaced with cryptographic signature and claims verification against Supabase Auth's JWKS endpoint (`SUPABASE_JWKS_URL`). Identity is strictly mapped from the verified `sub` claim.
+- **Service Role RLS Bypass**: Server-side requests utilize `SUPABASE_SECRET_KEY` which intentionally bypasses PostgreSQL Row Level Security (RLS). Row isolation is enforced at the application layer via explicit `user_id` query scoping derived from the cryptographically verified JWT.
+- **No Identity Spoofing**: All query parameter (`?userId=...`), custom header (`X-User-ID`), and tool argument identity injection vectors are rejected or stripped.
