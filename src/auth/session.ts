@@ -49,10 +49,11 @@ export function createUserContext(
   email?: string,
   metadata?: Record<string, unknown>
 ): UserContext {
+  const isAnonymous = !userId || userId === 'anonymous';
   return {
-    userId,
+    userId: isAnonymous ? 'anonymous' : userId,
     email,
-    isAuthenticated: true,
+    isAuthenticated: !isAnonymous,
     metadata,
   };
 }

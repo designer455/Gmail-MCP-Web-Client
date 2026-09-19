@@ -30,7 +30,7 @@ export async function handleStatusTool(): Promise<ServerStatusResult> {
   let hasCredentials = false;
   let emailAddress: string | undefined = undefined;
 
-  if (currentUser?.userId) {
+  if (currentUser?.isAuthenticated && currentUser.userId && currentUser.userId !== 'anonymous') {
     hasCredentials = await tokenStore.hasUserCredentials(currentUser.userId);
     if (hasCredentials) {
       const creds = await tokenStore.getUserCredentials(currentUser.userId);
@@ -46,7 +46,10 @@ export async function handleStatusTool(): Promise<ServerStatusResult> {
     oauthConfigured: Boolean(env.GOOGLE_REDIRECT_URI),
     authenticated: hasCredentials,
     tokenStore: tokenStore.getStoreType(),
-    userId: currentUser?.userId,
+    userId:
+      currentUser?.isAuthenticated && currentUser.userId !== 'anonymous'
+        ? currentUser.userId
+        : undefined,
     emailAddress,
   };
 }

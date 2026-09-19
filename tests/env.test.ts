@@ -72,4 +72,44 @@ describe('1. Environment Validation', () => {
     });
     expect((parsed as any).DATABASE_URL).toBeUndefined();
   });
+
+  it('fails in production if SUPABASE_URL is missing', () => {
+    const prodEnv = {
+      GOOGLE_CLIENT_ID: 'mock-id',
+      GOOGLE_CLIENT_SECRET: 'mock-secret',
+      NODE_ENV: 'production',
+      SUPABASE_SECRET_KEY: 'mock-secret-key',
+    };
+
+    expect(() => parseEnv(prodEnv)).toThrowError(
+      /SUPABASE_URL is required in production environment/
+    );
+  });
+
+  it('fails in production if SUPABASE_SECRET_KEY is missing', () => {
+    const prodEnv = {
+      GOOGLE_CLIENT_ID: 'mock-id',
+      GOOGLE_CLIENT_SECRET: 'mock-secret',
+      NODE_ENV: 'production',
+      SUPABASE_URL: 'https://example.supabase.co',
+    };
+
+    expect(() => parseEnv(prodEnv)).toThrowError(
+      /SUPABASE_SECRET_KEY is required in production environment/
+    );
+  });
+
+  it('succeeds in production when SUPABASE_URL and SUPABASE_SECRET_KEY are provided', () => {
+    const prodEnv = {
+      GOOGLE_CLIENT_ID: 'mock-id',
+      GOOGLE_CLIENT_SECRET: 'mock-secret',
+      NODE_ENV: 'production',
+      SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_SECRET_KEY: 'mock-secret-key',
+    };
+
+    const parsed = parseEnv(prodEnv);
+    expect(parsed.SUPABASE_URL).toBe('https://example.supabase.co');
+    expect(parsed.SUPABASE_SECRET_KEY).toBe('mock-secret-key');
+  });
 });

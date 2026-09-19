@@ -15,6 +15,9 @@
  */
 
 import { encryptCredentials, decryptCredentials } from './crypto.js';
+import { SupabaseTokenStore } from './supabase-token-store.js';
+import { getEnv } from '../config/env.js';
+import { ConfigurationError } from '../utils/errors.js';
 
 export interface OAuthCredentials {
   access_token?: string | null;
@@ -23,6 +26,7 @@ export interface OAuthCredentials {
   token_type?: string | null;
   expiry_date?: number | null;
   emailAddress?: string | null;
+  googleAccountId?: string | null;
 }
 
 export interface TokenStore {
@@ -84,13 +88,41 @@ export class MemoryTokenStore implements TokenStore {
   }
 }
 
-// Global default token store instance
-let activeTokenStore: TokenStore = new MemoryTokenStore();
+// Global default token store instance (memoized or dynamically resolved)
+let activeTokenStore: TokenStore | null = null;
 
 export function getTokenStore(): TokenStore {
+  if (activeTokenStore) {
+    return activeTokenStore;
+  }
+
+  const env = getEnv();
+
+  if (env.NODE_ENV === 'production') {
+    if (!env.SUPABASE_URL || !env.SUPABASE_SECRET_KEY) {
+      throw new ConfigurationError(
+        'Production environment requires SUPABASE_URL and SUPABASE_SECRET_KEY. Fallback to in-memory store is forbidden.'
+      );
+    }
+    activeTokenStore = new SupabaseTokenStore();
+    return activeTokenStore;
+  }
+
+  // In development, use SupabaseTokenStore if credentials are provided in .env
+  if (env.NODE_ENV === 'development' && env.SUPABASE_URL && env.SUPABASE_SECRET_KEY) {
+    activeTokenStore = new SupabaseTokenStore();
+    return activeTokenStore;
+  }
+
+  // Development / Test default fallback
+  activeTokenStore = new MemoryTokenStore();
   return activeTokenStore;
 }
 
-export function setTokenStore(store: TokenStore): void {
+export function setTokenStore(store: TokenStore | null): void {
   activeTokenStore = store;
+}
+
+export function resetTokenStore(): void {
+  activeTokenStore = null;
 }

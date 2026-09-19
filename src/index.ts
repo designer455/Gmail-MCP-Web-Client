@@ -11,7 +11,7 @@ const server = app.listen(env.PORT, () => {
   logger.info(`Environment: ${env.NODE_ENV}`);
   logger.info(`OAuth Redirect URI: ${env.GOOGLE_REDIRECT_URI}`);
   logger.info(`TokenStore: development-memory (NON-PRODUCTION TOKEN STORAGE)`);
-  logger.info(`MCP SSE Endpoint: http://localhost:${env.PORT}/sse`);
+  logger.info(`MCP Streamable HTTP Endpoint: http://localhost:${env.PORT}/mcp`);
   logger.info(`====================================================`);
 });
 

@@ -1,10 +1,10 @@
 import express, { Request, Response } from 'express';
-import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createMcpServer, GMAIL_TOOLS } from './server.js';
 import { getEnv } from './config/env.js';
 import { getAuthorizationUrl } from './auth/oauth.js';
 import { handleOAuthCallback } from './auth/callback.js';
-import { getCurrentUser, runWithUserContext, UserContext } from './auth/session.js';
+import { getCurrentUser } from './auth/session.js';
 import { getTokenStore } from './auth/token-store.js';
 import { authMiddleware } from './middleware/auth.js';
 import {
@@ -17,11 +17,6 @@ import { rateLimiter } from './middleware/rate-limit.js';
 import { logger } from './utils/logger.js';
 import { sanitizeErrorMessage } from './utils/errors.js';
 
-interface ActiveSession {
-  transport: SSEServerTransport;
-  userContext: UserContext;
-}
-
 export function createApp(): express.Application {
   const app = express();
 
@@ -32,9 +27,6 @@ export function createApp(): express.Application {
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true }));
   app.use(rateLimiter());
-
-  // Store active SSE sessions by sessionId
-  const activeSessions = new Map<string, ActiveSession>();
 
   // Landing page / dashboard
   app.get('/', authMiddleware, async (req: Request, res: Response) => {
@@ -272,14 +264,18 @@ export function createApp(): express.Application {
 
     <div class="card">
       <h2><span>MCP Endpoint Details</span></h2>
-      <p style="color: var(--text-muted); font-size: 0.95rem;">Configure your MCP client (such as ChatGPT, Claude Desktop, or Cursor) to connect via Server-Sent Events:</p>
+      <p style="color: var(--text-muted); font-size: 0.95rem;">Configure your MCP client (such as ChatGPT, Claude Desktop, or Cursor) to connect via Streamable HTTP:</p>
       <div class="info-item" style="margin-bottom: 0.75rem;">
-        <div class="info-label">SSE URL</div>
-        <div class="info-value"><code>https://${req.headers.host || 'gmail-mcp-web-client.vercel.app'}/sse</code></div>
+        <div class="info-label">Streamable HTTP MCP URL</div>
+        <div class="info-value"><code>https://${req.headers.host || 'gmail-mcp-web-client.vercel.app'}/mcp</code></div>
+      </div>
+      <div class="info-item" style="margin-bottom: 0.75rem;">
+        <div class="info-label">Authentication Header</div>
+        <div class="info-value"><code>Authorization: Bearer &lt;user_token&gt;</code></div>
       </div>
       <div class="info-item">
-        <div class="info-label">Messages URL</div>
-        <div class="info-value"><code>https://${req.headers.host || 'gmail-mcp-web-client.vercel.app'}/message</code></div>
+        <div class="info-label">Transport Protocol</div>
+        <div class="info-value">Streamable HTTP (Stateless / Vercel Serverless Ready)</div>
       </div>
     </div>
 
@@ -391,42 +387,33 @@ export function createApp(): express.Application {
     }
   });
 
-  // MCP Server-Sent Events (SSE) Transport endpoint
-  app.get('/sse', authMiddleware, async (req: Request, res: Response) => {
-    const userContext = getCurrentUser();
-    logger.info(`New MCP SSE connection initiated for user [${userContext.userId}]`);
+  // Production-Ready Stateless MCP Streamable HTTP Transport endpoint
+  // Handles POST (MCP JSON-RPC messages) and GET (streaming SSE connections where supported)
+  app.all('/mcp', authMiddleware, async (req: Request, res: Response) => {
+    try {
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined, // Stateless mode (no in-memory sessions / Vercel-ready)
+        enableJsonResponse: true, // Enables direct JSON responses for HTTP POST requests
+      });
 
-    const transport = new SSEServerTransport('/message', res);
-    activeSessions.set(transport.sessionId, { transport, userContext });
+      const mcpServer = createMcpServer();
+      await mcpServer.connect(transport);
 
-    const mcpServer = createMcpServer();
-    await mcpServer.connect(transport);
-
-    req.on('close', () => {
-      logger.info(`MCP SSE connection closed for session [${transport.sessionId}]`);
-      activeSessions.delete(transport.sessionId);
-    });
-  });
-
-  // MCP POST Message endpoint (receives JSON-RPC messages from client)
-  app.post('/message', async (req: Request, res: Response) => {
-    const sessionId = (req.query['sessionId'] as string) || (req.headers['x-session-id'] as string);
-
-    if (!sessionId) {
-      res.status(400).json({ error: 'Missing sessionId query parameter or header' });
-      return;
+      await transport.handleRequest(req, res, req.body);
+    } catch (error: unknown) {
+      const safeErrorMsg = sanitizeErrorMessage(error);
+      logger.error(`Error handling /mcp request: ${safeErrorMsg}`);
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: '2.0',
+          error: {
+            code: -32603,
+            message: 'Internal error handling MCP request',
+          },
+          id: null,
+        });
+      }
     }
-
-    const session = activeSessions.get(sessionId);
-    if (!session) {
-      res.status(404).json({ error: 'Active MCP session not found or expired' });
-      return;
-    }
-
-    // Run the MCP message handler under the isolated user context for that SSE session
-    await runWithUserContext(session.userContext, async () => {
-      await session.transport.handlePostMessage(req, res);
-    });
   });
 
   // Express centralized error handling

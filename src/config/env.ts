@@ -4,24 +4,45 @@ import { z } from 'zod';
 // Load environment variables from .env file if available
 dotenv.config();
 
-const envSchema = z.object({
-  GOOGLE_CLIENT_ID: z.string().min(1, 'GOOGLE_CLIENT_ID is required'),
-  GOOGLE_CLIENT_SECRET: z.string().min(1, 'GOOGLE_CLIENT_SECRET is required'),
-  GOOGLE_REDIRECT_URI: z
-    .string()
-    .url('GOOGLE_REDIRECT_URI must be a valid URL')
-    .default('https://gmail-mcp-web-client.vercel.app/api/auth/callback'),
-  ENCRYPTION_KEY: z
-    .string()
-    .min(32, 'ENCRYPTION_KEY must be at least 32 characters long for AES-256-GCM')
-    .default('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'),
-  MCP_AUTH_SECRET: z
-    .string()
-    .min(16, 'MCP_AUTH_SECRET must be at least 16 characters long')
-    .default('default_mcp_auth_secret_dev_32chars!'),
-  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
-  PORT: z.coerce.number().default(3000),
-});
+const envSchema = z
+  .object({
+    GOOGLE_CLIENT_ID: z.string().min(1, 'GOOGLE_CLIENT_ID is required'),
+    GOOGLE_CLIENT_SECRET: z.string().min(1, 'GOOGLE_CLIENT_SECRET is required'),
+    GOOGLE_REDIRECT_URI: z
+      .string()
+      .url('GOOGLE_REDIRECT_URI must be a valid URL')
+      .default('https://gmail-mcp-web-client.vercel.app/api/auth/callback'),
+    ENCRYPTION_KEY: z
+      .string()
+      .min(32, 'ENCRYPTION_KEY must be at least 32 characters long for AES-256-GCM')
+      .default('0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'),
+    MCP_AUTH_SECRET: z
+      .string()
+      .min(16, 'MCP_AUTH_SECRET must be at least 16 characters long')
+      .default('default_mcp_auth_secret_dev_32chars!'),
+    NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+    PORT: z.coerce.number().default(3000),
+    SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL').optional(),
+    SUPABASE_SECRET_KEY: z.string().min(1, 'SUPABASE_SECRET_KEY cannot be empty').optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.NODE_ENV === 'production') {
+      if (!data.SUPABASE_URL) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'SUPABASE_URL is required in production environment',
+          path: ['SUPABASE_URL'],
+        });
+      }
+      if (!data.SUPABASE_SECRET_KEY) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'SUPABASE_SECRET_KEY is required in production environment',
+          path: ['SUPABASE_SECRET_KEY'],
+        });
+      }
+    }
+  });
 
 export type EnvConfig = z.infer<typeof envSchema>;
 

@@ -56,20 +56,32 @@ export function httpsEnforcer(req: Request, res: Response, next: NextFunction): 
  * Centralized Express error handler.
  * Prevents stack traces and sensitive error details from leaking to clients.
  */
-export function errorHandler(
-  err: unknown,
-  _req: Request,
-  res: Response,
-  _next: NextFunction
-): void {
-  const statusCode = err instanceof AppError ? err.statusCode : 500;
-  const safeMessage = sanitizeErrorMessage(err);
+export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
+  const errObj = err as { status?: number };
+  const isSyntaxError = err instanceof SyntaxError && errObj.status === 400;
+  const statusCode =
+    err instanceof AppError ? err.statusCode : isSyntaxError ? 400 : errObj.status || 500;
+  const safeMessage = isSyntaxError ? 'Parse error: Invalid JSON' : sanitizeErrorMessage(err);
 
   logger.error(`Handled request error [${statusCode}]: ${safeMessage}`);
+
+  // Format as standard JSON-RPC 2.0 error if it's an MCP route
+  if (req.path === '/mcp' || req.baseUrl === '/mcp') {
+    res.status(statusCode).json({
+      jsonrpc: '2.0',
+      error: {
+        code: isSyntaxError ? -32700 : -32603,
+        message: safeMessage,
+      },
+      id: null,
+    });
+    return;
+  }
 
   res.status(statusCode).json({
     success: false,
     error: safeMessage,
-    code: err instanceof AppError ? err.code : 'INTERNAL_SERVER_ERROR',
+    code:
+      err instanceof AppError ? err.code : isSyntaxError ? 'BAD_REQUEST' : 'INTERNAL_SERVER_ERROR',
   });
 }

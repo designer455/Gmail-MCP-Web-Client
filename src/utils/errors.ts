@@ -84,6 +84,12 @@ export class GmailApiError extends AppError {
   }
 }
 
+export class ConfigurationError extends AppError {
+  constructor(message: string) {
+    super(message, 500, 'CONFIGURATION_ERROR');
+  }
+}
+
 /**
  * Sanitizes any raw unknown error into a safe client-facing message,
  * making sure secrets, stack traces, and tokens are NEVER leaked.

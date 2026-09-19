@@ -21,6 +21,9 @@ export class GmailClientService {
    */
   public static async getClient(): Promise<AuthenticatedGmailClient> {
     const user = getCurrentUser();
+    if (!user.isAuthenticated || user.userId === 'anonymous') {
+      throw new GmailNotConnectedError();
+    }
     const tokenStore = getTokenStore();
 
     const credentials = await tokenStore.getUserCredentials(user.userId);

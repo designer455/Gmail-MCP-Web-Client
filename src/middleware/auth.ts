@@ -9,22 +9,28 @@ import { GmailNotConnectedError } from '../utils/errors.js';
  * execution context for the duration of the request.
  */
 export function authMiddleware(req: Request, _res: Response, next: NextFunction): void {
-  // 1. Check custom user header
-  let userId = (req.headers['x-user-id'] as string) || '';
+  let userId = '';
 
-  // 2. Check Bearer token (can represent session token or user ID)
+  // 1. Primary authentication mechanism: Authorization: Bearer <credential>
   const authHeader = req.headers['authorization'];
-  if (!userId && authHeader && authHeader.startsWith('Bearer ')) {
+  if (authHeader && authHeader.startsWith('Bearer ')) {
     userId = authHeader.substring(7).trim();
   }
 
-  // 3. Optional query parameter for local development / testing
-  if (!userId && req.query['userId']) {
+  // 2. Secondary mechanism: x-user-id header (for internal service-to-service calls)
+  if (!userId && req.headers['x-user-id']) {
+    userId = String(req.headers['x-user-id']).trim();
+  }
+
+  // 3. For non-MCP browser routes (like /auth/login or /), allow ?userId= parameter
+  // CRITICAL SECURITY RULE: On /mcp, query parameters are NEVER trusted for user/account selection
+  const isMcpRoute = req.path === '/mcp' || req.baseUrl === '/mcp';
+  if (!userId && !isMcpRoute && req.query['userId']) {
     userId = String(req.query['userId']).trim();
   }
 
-  // 4. Default fallback in development environment only if not specified
-  if (!userId && process.env.NODE_ENV !== 'production') {
+  // 4. Default fallback only in development environment for non-MCP routes
+  if (!userId && process.env.NODE_ENV === 'development' && !isMcpRoute) {
     userId = 'dev-user-default';
   }
 
@@ -40,6 +46,12 @@ export function authMiddleware(req: Request, _res: Response, next: NextFunction)
  */
 export async function requireConnectedGmail(): Promise<void> {
   const user = getCurrentUser();
+  if (!user.isAuthenticated || user.userId === 'anonymous') {
+    throw new GmailNotConnectedError(
+      'Gmail account is not connected. Please complete Google OAuth or supply valid credentials.'
+    );
+  }
+
   const tokenStore = getTokenStore();
   const hasCredentials = await tokenStore.hasUserCredentials(user.userId);
 
