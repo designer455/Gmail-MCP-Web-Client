@@ -24,6 +24,7 @@ const envSchema = z
     PORT: z.coerce.number().default(3000),
     SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL').optional(),
     SUPABASE_SECRET_KEY: z.string().min(1, 'SUPABASE_SECRET_KEY cannot be empty').optional(),
+    SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
     SUPABASE_JWKS_URL: z.string().url('SUPABASE_JWKS_URL must be a valid URL').optional(),
   })
   .superRefine((data, ctx) => {

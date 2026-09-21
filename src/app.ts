@@ -7,6 +7,7 @@ import { handleOAuthCallback } from './auth/callback.js';
 import { getCurrentUser } from './auth/session.js';
 import { getTokenStore } from './auth/token-store.js';
 import { authMiddleware, requireAuthMiddleware } from './middleware/auth.js';
+import { renderLoginPage } from './views/login-page.js';
 import {
   securityHeaders,
   corsMiddleware,
@@ -240,13 +241,13 @@ export function createApp(options: AppOptions = {}): express.Application {
           ? `
         <p>Gmail account <strong>${credentials?.emailAddress || 'Authorized'}</strong> is connected for session <code>${user.userId}</code>.</p>
         <div style="margin-top: 1rem;">
-          <a href="/auth/login" class="btn" style="background: rgba(255,255,255,0.1); color: #fff;">Re-authorize Account</a>
+          <a href="/login" class="btn" style="background: rgba(255,255,255,0.1); color: #fff;">Re-authorize Account</a>
         </div>
       `
           : `
         <p>Authorize this session to connect your Gmail mailbox. Each user's tokens are strictly isolated.</p>
         <div style="margin-top: 1.25rem;">
-          <a href="/auth/login" class="btn">Connect Gmail Account →</a>
+          <a href="/login" class="btn">Connect Gmail Account →</a>
         </div>
       `
       }
@@ -317,11 +318,32 @@ export function createApp(options: AppOptions = {}): express.Application {
     });
   });
 
-  // Convenience login endpoint - initiates OAuth consent flow
+  // Public browser authentication page: Supabase Auth -> Google OAuth bridge
+  app.get('/login', (_req: Request, res: Response) => {
+    const env = getEnv();
+    const supabaseUrl = env.SUPABASE_URL || '';
+    const supabasePublishableKey =
+      env.SUPABASE_PUBLISHABLE_KEY ||
+      process.env.SUPABASE_PUBLISHABLE_KEY ||
+      process.env.SUPABASE_ANON_KEY ||
+      '';
+
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(200).send(renderLoginPage({ supabaseUrl, supabasePublishableKey }));
+  });
+
+  // Protected login endpoint - initiates OAuth consent flow for authenticated Supabase user
   app.get('/auth/login', authMiddleware, (req: Request, res: Response) => {
     const user = getCurrentUser();
     const redirectOverride = req.query['redirectUri'] as string | undefined;
     const { url } = getAuthorizationUrl(user.userId, redirectOverride);
+
+    // If client requested JSON (e.g. frontend bridge fetch from /login), return JSON object
+    if (req.accepts('json') || req.headers['accept']?.includes('application/json')) {
+      res.status(200).json({ url });
+      return;
+    }
+
     res.redirect(url);
   });
 

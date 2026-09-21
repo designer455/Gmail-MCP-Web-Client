@@ -22,6 +22,7 @@ import {
   createForgedJwt,
   createRotatedKeyJwt,
 } from './helpers/jwt-test-helper.js';
+import { validateOAuthState } from '../src/auth/state.js';
 
 describe('Phase 4 — Authentication Hardening Tests', () => {
   let server: Server;
@@ -421,5 +422,123 @@ describe('Phase 4 — Authentication Hardening Tests', () => {
     expect(redacted).not.toContain(rawJwt);
     expect(redacted).not.toContain(secretKey);
     expect(redacted).toContain('[REDACTED]');
+  });
+
+  describe('Phase 5B — Safe OAuth Browser Initiation Flow (/login and /auth/login)', () => {
+    it('A. GET /auth/login without Authorization header returns HTTP 401 Unauthorized', async () => {
+      const res = await fetch(`${BASE_URL}/auth/login`, {
+        method: 'GET',
+        redirect: 'manual',
+      });
+      expect(res.status).toBe(401);
+      const json = await res.json();
+      expect(json.error).toBe('Unauthorized');
+      expect(res.headers.get('www-authenticate')).toContain('Bearer');
+    });
+
+    it('B. GET /auth/login with invalid JWT returns HTTP 401 Unauthorized', async () => {
+      const res = await fetch(`${BASE_URL}/auth/login`, {
+        method: 'GET',
+        headers: {
+          Authorization: 'Bearer invalid.jwt.token',
+          Accept: 'application/json',
+        },
+        redirect: 'manual',
+      });
+      expect(res.status).toBe(401);
+      const json = await res.json();
+      expect(json.error).toBe('Unauthorized');
+    });
+
+    it('C. GET /auth/login with valid JWT and Accept: application/json returns HTTP 200 JSON with OAuth URL', async () => {
+      const testUserId = 'test-supabase-user-5b';
+      const token = await createTestJwt({ sub: testUserId, email: 'test5b@example.com' });
+
+      const res = await fetch(`${BASE_URL}/auth/login`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+        redirect: 'manual',
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('application/json');
+      const data = await res.json();
+      expect(data.url).toBeDefined();
+      expect(data.url).toContain('https://accounts.google.com/o/oauth2/v2/auth');
+    });
+
+    it('D. Returned OAuth URL contains a cryptographically signed state bound strictly to verified user ID', async () => {
+      const testUserId = 'user-bound-identity-5b';
+      const token = await createTestJwt({ sub: testUserId, email: 'bound@example.com' });
+
+      const res = await fetch(`${BASE_URL}/auth/login`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+      });
+
+      expect(res.status).toBe(200);
+      const data = await res.json();
+      const parsedUrl = new URL(data.url);
+      const stateParam = parsedUrl.searchParams.get('state');
+      expect(stateParam).toBeDefined();
+
+      // Cryptographically validate state and bound identity
+      const validatedState = validateOAuthState(stateParam!);
+      expect(validatedState.userId).toBe(testUserId);
+      expect(validatedState.timestamp).toBeGreaterThan(0);
+      expect(validatedState.nonce).toBeDefined();
+    });
+
+    it('E. /login page is publicly accessible without authentication', async () => {
+      const res = await fetch(`${BASE_URL}/login`, {
+        method: 'GET',
+        redirect: 'manual',
+      });
+
+      expect(res.status).toBe(200);
+      expect(res.headers.get('content-type')).toContain('text/html');
+      const html = await res.text();
+      expect(html).toContain('Connect Gmail Account');
+      expect(html).toContain('login-form');
+      expect(html).toContain('type="email"');
+      expect(html).toContain('type="password"');
+    });
+
+    it('F. Does NOT expose Supabase JWT in page URL, query strings, or redirect responses', async () => {
+      const testUserId = 'secret-jwt-user';
+      const token = await createTestJwt({ sub: testUserId });
+
+      const res = await fetch(`${BASE_URL}/auth/login`, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/json',
+        },
+      });
+
+      const bodyText = await res.text();
+      // Ensure the returned JSON body contains no JWT
+      expect(bodyText).not.toContain(token);
+
+      const parsed = JSON.parse(bodyText);
+      const parsedUrl = new URL(parsed.url);
+      // Ensure Google OAuth URL contains no JWT
+      expect(parsedUrl.search).not.toContain(token);
+      expect(parsedUrl.searchParams.get('token')).toBeNull();
+    });
+
+    it('G. Does NOT expose JWT in server logs (redacted in log entries)', () => {
+      const rawJwt = 'eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyLXJlZGFjdCJ9.signature';
+      const logString = `GET /auth/login Authorization: Bearer ${rawJwt}`;
+      const redacted = redactSensitiveData(logString);
+      expect(redacted).not.toContain(rawJwt);
+      expect(redacted).toContain('[REDACTED]');
+    });
   });
 });
