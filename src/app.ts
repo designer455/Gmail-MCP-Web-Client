@@ -7,6 +7,7 @@ import { handleOAuthCallback } from './auth/callback.js';
 import { getCurrentUser } from './auth/session.js';
 import { getTokenStore } from './auth/token-store.js';
 import { authMiddleware, requireAuthMiddleware } from './middleware/auth.js';
+import { verifyGoogleLinkToken } from './auth/link-token.js';
 import { renderLoginPage } from './views/login-page.js';
 import {
   securityHeaders,
@@ -325,6 +326,104 @@ export function createApp(options: AppOptions = {}): express.Application {
     });
   });
 
+  // Safe diagnostic endpoint verifying: MCP user → stored Gmail credential → decrypted credential → Gmail API profile
+  app.get(
+    '/api/diagnostic/credential-flow',
+    authMiddleware,
+    async (_req: Request, res: Response) => {
+      const user = getCurrentUser();
+      const tokenStore = getTokenStore();
+
+      const diagnosticResult: {
+        status: 'ok' | 'error';
+        timestamp: string;
+        stages: {
+          userIdentified: boolean;
+          hasStoredCredentialRecord: boolean;
+          decryptionSuccessful: boolean;
+          gmailApiReachable: boolean;
+        };
+        diagnostics: {
+          userId?: string;
+          emailAddress?: string;
+          tokenStoreType: string;
+          hasRefreshToken?: boolean;
+          tokenExpiry?: string | null;
+          errorMessage?: string;
+        };
+      } = {
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        stages: {
+          userIdentified: user.isAuthenticated && user.userId !== 'anonymous',
+          hasStoredCredentialRecord: false,
+          decryptionSuccessful: false,
+          gmailApiReachable: false,
+        },
+        diagnostics: {
+          userId: user.isAuthenticated && user.userId !== 'anonymous' ? user.userId : undefined,
+          tokenStoreType: tokenStore.getStoreType(),
+        },
+      };
+
+      if (!diagnosticResult.stages.userIdentified) {
+        diagnosticResult.status = 'error';
+        diagnosticResult.diagnostics.errorMessage =
+          'MCP user is not authenticated. Please provide a valid Authorization: Bearer token.';
+        res.status(401).json(diagnosticResult);
+        return;
+      }
+
+      try {
+        // Stage 2: Stored record lookup
+        const hasRecord = await tokenStore.hasUserCredentials(user.userId);
+        diagnosticResult.stages.hasStoredCredentialRecord = hasRecord;
+
+        if (!hasRecord) {
+          diagnosticResult.status = 'error';
+          diagnosticResult.diagnostics.errorMessage =
+            'No Gmail credential record found in database for this user.';
+          res.status(200).json(diagnosticResult);
+          return;
+        }
+
+        // Stage 3: Retrieval & in-memory decryption
+        const creds = await tokenStore.getUserCredentials(user.userId);
+        if (!creds || !creds.access_token) {
+          diagnosticResult.status = 'error';
+          diagnosticResult.diagnostics.errorMessage =
+            'Credential record exists but decryption failed or access_token is missing.';
+          res.status(200).json(diagnosticResult);
+          return;
+        }
+
+        diagnosticResult.stages.decryptionSuccessful = true;
+        diagnosticResult.diagnostics.emailAddress = creds.emailAddress || undefined;
+        diagnosticResult.diagnostics.hasRefreshToken = Boolean(creds.refresh_token);
+        diagnosticResult.diagnostics.tokenExpiry = creds.expiry_date
+          ? new Date(creds.expiry_date).toISOString()
+          : null;
+
+        // Stage 4: Gmail API client verification (strictly querying 'me')
+        const { gmail } = await import('./gmail/client.js').then((m) =>
+          m.GmailClientService.getClient()
+        );
+        const profile = await gmail.users.getProfile({ userId: 'me' });
+
+        diagnosticResult.stages.gmailApiReachable = true;
+        if (profile.data.emailAddress) {
+          diagnosticResult.diagnostics.emailAddress = profile.data.emailAddress;
+        }
+
+        res.status(200).json(diagnosticResult);
+      } catch (err: unknown) {
+        diagnosticResult.status = 'error';
+        diagnosticResult.diagnostics.errorMessage = sanitizeErrorMessage(err);
+        res.status(200).json(diagnosticResult);
+      }
+    }
+  );
+
   // RFC 9728 — OAuth 2.0 Protected Resource Metadata (for MCP & ChatGPT discovery)
   app.get('/.well-known/oauth-protected-resource', getProtectedResourceMetadata);
   app.get('/.well-known/oauth-protected-resource/mcp', getProtectedResourceMetadata);
@@ -343,27 +442,61 @@ export function createApp(options: AppOptions = {}): express.Application {
     res.status(204).end();
   });
 
-  // Public browser authentication page: Supabase Auth -> Google OAuth bridge
-  app.get('/login', (_req: Request, res: Response) => {
-    const env = getEnv();
-    const supabaseUrl = env.SUPABASE_URL || '';
-    const supabasePublishableKey =
-      env.SUPABASE_PUBLISHABLE_KEY ||
-      process.env.SUPABASE_PUBLISHABLE_KEY ||
-      process.env.SUPABASE_ANON_KEY ||
-      '';
-
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.status(200).send(renderLoginPage({ supabaseUrl, supabasePublishableKey }));
+  // One-time Google Account Linking endpoint (user opens URL generated from MCP tool)
+  app.get('/auth/google/link', (req: Request, res: Response) => {
+    try {
+      const token = req.query['token'] as string | undefined;
+      if (!token) {
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.status(400).send(renderLinkErrorHtml('Missing connection link token.'));
+        return;
+      }
+      const { installationId } = verifyGoogleLinkToken(token);
+      const { url } = getAuthorizationUrl(installationId);
+      res.redirect(302, url);
+    } catch (err: unknown) {
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.status(400).send(renderLinkErrorHtml(sanitizeErrorMessage(err)));
+    }
   });
 
-  // Protected login endpoint - initiates OAuth consent flow for authenticated Supabase user
+  // Google Connection Status check for authenticated installation
+  app.get('/auth/google/status', authMiddleware, async (req: Request, res: Response) => {
+    const user = getCurrentUser();
+    const tokenStore = getTokenStore();
+    const isConnected = await tokenStore.hasUserCredentials(user.userId);
+    const creds = isConnected ? await tokenStore.getUserCredentials(user.userId) : null;
+
+    res.status(200).json({
+      connected: isConnected,
+      installationId: user.userId,
+      emailAddress: creds?.emailAddress || undefined,
+    });
+  });
+
+  // Disconnect Google Account for current installation
+  app.post('/auth/google/disconnect', authMiddleware, async (req: Request, res: Response) => {
+    const user = getCurrentUser();
+    const tokenStore = getTokenStore();
+    await tokenStore.deleteUserCredentials(user.userId);
+    res.status(200).json({
+      success: true,
+      message: 'Gmail disconnected successfully for this installation.',
+    });
+  });
+
+  // Information page for direct browser visits to /login
+  app.get('/login', (_req: Request, res: Response) => {
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(200).send(renderLoginPage());
+  });
+
+  // Re-authorization initiation endpoint for authenticated installation
   app.get('/auth/login', authMiddleware, (req: Request, res: Response) => {
     const user = getCurrentUser();
     const redirectOverride = req.query['redirectUri'] as string | undefined;
     const { url } = getAuthorizationUrl(user.userId, redirectOverride);
 
-    // If client requested JSON (e.g. frontend bridge fetch from /login), return JSON object
     if (req.accepts('json') || req.headers['accept']?.includes('application/json')) {
       res.status(200).json({ url });
       return;
@@ -473,4 +606,29 @@ export function createApp(options: AppOptions = {}): express.Application {
   app.use(errorHandler);
 
   return app;
+}
+
+function renderLinkErrorHtml(message: string): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Connection Link Error - Gmail MCP</title>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .card { background: #1e293b; border: 1px solid #ef4444; border-radius: 1rem; padding: 2.5rem; max-width: 480px; text-align: center; }
+    h1 { color: #f87171; margin-top: 0; font-size: 1.5rem; }
+    p { color: #94a3b8; line-height: 1.5; }
+    a { color: #38bdf8; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Invalid or Expired Link</h1>
+    <p>${message}</p>
+    <p>Please return to ChatGPT and invoke any Gmail tool to generate a fresh connection link.</p>
+    <p><a href="/">← Return to Dashboard</a></p>
+  </div>
+</body>
+</html>`;
 }

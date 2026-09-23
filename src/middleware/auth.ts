@@ -6,7 +6,7 @@ import { GmailNotConnectedError, sanitizeErrorMessage } from '../utils/errors.js
 import { logger } from '../utils/logger.js';
 
 /**
- * Express middleware that extracts and cryptographically verifies the Supabase Auth JWT
+ * Express middleware that extracts and cryptographically verifies the MCP Bearer JWT
  * from the incoming Authorization: Bearer <token> header.
  *
  * Strict Security Rules:

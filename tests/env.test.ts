@@ -11,8 +11,10 @@ describe('1. Environment Validation', () => {
       GOOGLE_CLIENT_ID: 'mock-client-id.apps.googleusercontent.com',
       GOOGLE_CLIENT_SECRET: 'mock-client-secret',
       GOOGLE_REDIRECT_URI: 'https://gmail-mcp-web-client.vercel.app/api/auth/callback',
-      ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      GMAIL_TOKEN_ENCRYPTION_KEY:
+        '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
       MCP_AUTH_SECRET: 'test_mcp_auth_secret_key_123456',
+      BLOB_READ_WRITE_TOKEN: 'vercel_blob_rw_test_token_123456',
       NODE_ENV: 'development',
       PORT: '3000',
     };
@@ -22,6 +24,10 @@ describe('1. Environment Validation', () => {
     expect(parsed.GOOGLE_REDIRECT_URI).toBe(
       'https://gmail-mcp-web-client.vercel.app/api/auth/callback'
     );
+    expect(parsed.ENCRYPTION_KEY).toBe(
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+    );
+    expect(parsed.BLOB_READ_WRITE_TOKEN).toBe('vercel_blob_rw_test_token_123456');
     expect(parsed.PORT).toBe(3000);
   });
 
@@ -65,70 +71,13 @@ describe('1. Environment Validation', () => {
     );
   });
 
-  it('ensures DATABASE_URL is not required or defined in env config', () => {
+  it('ensures Supabase environment variables are removed and not required', () => {
     const parsed = parseEnv({
       GOOGLE_CLIENT_ID: 'mock-id',
       GOOGLE_CLIENT_SECRET: 'mock-secret',
     });
-    expect((parsed as any).DATABASE_URL).toBeUndefined();
-  });
-
-  it('fails in production if SUPABASE_URL is missing', () => {
-    const prodEnv = {
-      GOOGLE_CLIENT_ID: 'mock-id',
-      GOOGLE_CLIENT_SECRET: 'mock-secret',
-      NODE_ENV: 'production',
-      SUPABASE_SECRET_KEY: 'mock-secret-key',
-    };
-
-    expect(() => parseEnv(prodEnv)).toThrowError(
-      /SUPABASE_URL is required in production environment/
-    );
-  });
-
-  it('fails in production if SUPABASE_SECRET_KEY is missing', () => {
-    const prodEnv = {
-      GOOGLE_CLIENT_ID: 'mock-id',
-      GOOGLE_CLIENT_SECRET: 'mock-secret',
-      NODE_ENV: 'production',
-      SUPABASE_URL: 'https://example.supabase.co',
-      SUPABASE_JWKS_URL: 'https://example.supabase.co/auth/v1/.well-known/jwks.json',
-    };
-
-    expect(() => parseEnv(prodEnv)).toThrowError(
-      /SUPABASE_SECRET_KEY is required in production environment/
-    );
-  });
-
-  it('fails in production if SUPABASE_JWKS_URL is missing', () => {
-    const prodEnv = {
-      GOOGLE_CLIENT_ID: 'mock-id',
-      GOOGLE_CLIENT_SECRET: 'mock-secret',
-      NODE_ENV: 'production',
-      SUPABASE_URL: 'https://example.supabase.co',
-      SUPABASE_SECRET_KEY: 'mock-secret-key',
-    };
-
-    expect(() => parseEnv(prodEnv)).toThrowError(
-      /SUPABASE_JWKS_URL is required in production environment/
-    );
-  });
-
-  it('succeeds in production when SUPABASE_URL, SUPABASE_SECRET_KEY, and SUPABASE_JWKS_URL are provided', () => {
-    const prodEnv = {
-      GOOGLE_CLIENT_ID: 'mock-id',
-      GOOGLE_CLIENT_SECRET: 'mock-secret',
-      NODE_ENV: 'production',
-      SUPABASE_URL: 'https://example.supabase.co',
-      SUPABASE_SECRET_KEY: 'mock-secret-key',
-      SUPABASE_JWKS_URL: 'https://example.supabase.co/auth/v1/.well-known/jwks.json',
-    };
-
-    const parsed = parseEnv(prodEnv);
-    expect(parsed.SUPABASE_URL).toBe('https://example.supabase.co');
-    expect(parsed.SUPABASE_SECRET_KEY).toBe('mock-secret-key');
-    expect(parsed.SUPABASE_JWKS_URL).toBe(
-      'https://example.supabase.co/auth/v1/.well-known/jwks.json'
-    );
+    expect((parsed as any).SUPABASE_URL).toBeUndefined();
+    expect((parsed as any).SUPABASE_SECRET_KEY).toBeUndefined();
+    expect((parsed as any).SUPABASE_JWKS_URL).toBeUndefined();
   });
 });

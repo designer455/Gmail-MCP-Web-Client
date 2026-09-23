@@ -1,14 +1,15 @@
 import { Request, Response } from 'express';
 import crypto from 'crypto';
 import { getEnv } from '../config/env.js';
-import { getSupabaseClient } from './supabase.js';
 import { encryptData, decryptData } from './crypto.js';
+import { generateInstallationId } from './installation.js';
+import { createMcpAccessToken } from './mcp-token.js';
 import { logger } from '../utils/logger.js';
 import { sanitizeErrorMessage } from '../utils/errors.js';
 
 export interface AuthorizationCodePayload {
-  userId: string;
-  email?: string;
+  installationId: string;
+  userId: string; // alias to installationId
   clientId: string;
   redirectUri: string;
   codeChallenge: string;
@@ -16,46 +17,15 @@ export interface AuthorizationCodePayload {
   scope?: string;
   expiresAt: number;
   nonce: string;
-  supabaseAccessToken: string;
-  supabaseRefreshToken?: string;
 }
 
 export interface RefreshTokenPayload {
-  userId: string;
-  supabaseRefreshToken: string;
+  installationId: string;
   createdAt: number;
 }
 
 // In-memory set for consumed authorization code nonces (replay protection)
 const consumedNonces = new Set<string>();
-
-// Test hooks for offline automated testing without live network calls to Supabase Auth
-export type AuthSignInHandler = (
-  email: string,
-  pass: string
-) => Promise<{
-  userId: string;
-  email: string;
-  accessToken: string;
-  refreshToken?: string;
-}>;
-
-export type AuthRefreshHandler = (refreshToken: string) => Promise<{
-  userId: string;
-  accessToken: string;
-  refreshToken?: string;
-}>;
-
-let testSignInHandler: AuthSignInHandler | null = null;
-let testRefreshHandler: AuthRefreshHandler | null = null;
-
-export function setTestAuthHandlers(
-  signIn: AuthSignInHandler | null,
-  refresh: AuthRefreshHandler | null
-): void {
-  testSignInHandler = signIn;
-  testRefreshHandler = refresh;
-}
 
 export function clearOAuthConsumedNonces(): void {
   consumedNonces.clear();
@@ -66,7 +36,6 @@ export function clearOAuthConsumedNonces(): void {
  */
 export function getBaseUrl(req: Request): string {
   const host = req.get('host') || 'gmail-mcp-web-client.vercel.app';
-  // If host is loopback or localhost and protocol is http, preserve http; otherwise https
   const proto =
     req.protocol === 'http' && (host.includes('localhost') || host.includes('127.0.0.1'))
       ? 'http'
@@ -137,7 +106,8 @@ export function verifyAuthorizationCode(code: string): AuthorizationCodePayload 
   const plaintext = decryptData(encrypted);
   const payload = JSON.parse(plaintext) as AuthorizationCodePayload;
 
-  if (!payload.userId || !payload.nonce || !payload.expiresAt || !payload.codeChallenge) {
+  const installId = payload.installationId || payload.userId;
+  if (!installId || !payload.nonce || !payload.expiresAt || !payload.codeChallenge) {
     throw new Error('Incomplete authorization code payload');
   }
 
@@ -149,7 +119,11 @@ export function verifyAuthorizationCode(code: string): AuthorizationCodePayload 
     throw new Error('Authorization code has already been consumed');
   }
 
-  return payload;
+  return {
+    ...payload,
+    installationId: installId,
+    userId: installId,
+  };
 }
 
 /**
@@ -184,8 +158,6 @@ export function verifyEncryptedRefreshToken(token: string): RefreshTokenPayload 
 
 /**
  * RFC 9728 — OAuth 2.0 Protected Resource Metadata
- * GET /.well-known/oauth-protected-resource
- * GET /.well-known/oauth-protected-resource/mcp
  */
 export function getProtectedResourceMetadata(req: Request, res: Response): void {
   const baseUrl = getBaseUrl(req);
@@ -206,7 +178,6 @@ export function getProtectedResourceMetadata(req: Request, res: Response): void 
 
 /**
  * RFC 8414 — OAuth 2.0 Authorization Server Metadata
- * GET /.well-known/oauth-authorization-server
  */
 export function getAuthorizationServerMetadata(req: Request, res: Response): void {
   const baseUrl = getBaseUrl(req);
@@ -248,18 +219,11 @@ export function renderAuthorizePage(req: Request, res: Response): void {
     return;
   }
 
-  if (!clientId || !redirectUri) {
+  if (!clientId || !redirectUri || !codeChallenge) {
     res.status(400).json({
       error: 'invalid_request',
-      error_description: 'Missing required parameters: client_id and redirect_uri',
-    });
-    return;
-  }
-
-  if (!codeChallenge) {
-    res.status(400).json({
-      error: 'invalid_request',
-      error_description: 'PKCE code_challenge is required',
+      error_description:
+        'Missing required parameters: client_id, redirect_uri, and code_challenge are mandatory',
     });
     return;
   }
@@ -286,24 +250,16 @@ export function renderAuthorizePage(req: Request, res: Response): void {
 }
 
 /**
- * Handles the Authorization Form submission
+ * Handles submission of OAuth authorization consent
  * POST /oauth/authorize
  */
 export async function handleAuthorizeSubmit(req: Request, res: Response): Promise<void> {
   const wantsJson =
-    req.headers['x-requested-with'] === 'XMLHttpRequest' ||
-    req.headers['accept'] === 'application/json';
+    req.accepts('json') &&
+    (req.headers['accept']?.includes('application/json') ||
+      req.headers['content-type']?.includes('application/json'));
 
-  const {
-    email,
-    password,
-    client_id,
-    redirect_uri,
-    state,
-    code_challenge,
-    code_challenge_method,
-    scope,
-  } = req.body;
+  const { client_id, redirect_uri, state, code_challenge, code_challenge_method, scope } = req.body;
 
   if (!client_id || !redirect_uri || !code_challenge) {
     res.status(400).json({
@@ -313,85 +269,14 @@ export async function handleAuthorizeSubmit(req: Request, res: Response): Promis
     return;
   }
 
-  if (!email || !password) {
-    if (wantsJson) {
-      res.status(400).json({
-        error: 'invalid_request',
-        message: 'Email and password are required',
-      });
-      return;
-    }
-    res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.status(400).send(
-      renderAuthorizeHtml({
-        clientId: client_id,
-        redirectUri: redirect_uri,
-        scope: scope || 'gmail offline_access',
-        state: state || '',
-        codeChallenge: code_challenge,
-        codeChallengeMethod: code_challenge_method || 'S256',
-        errorMessage: 'Email and password are required',
-      })
-    );
-    return;
-  }
-
   try {
-    let authUser: {
-      userId: string;
-      email: string;
-      accessToken: string;
-      refreshToken?: string;
-    };
+    // Generate new isolated installation identity for this ChatGPT installation
+    const installationId = generateInstallationId();
 
-    if (testSignInHandler) {
-      // Use test hook when running offline unit tests
-      authUser = await testSignInHandler(email, password);
-    } else {
-      const supabase = getSupabaseClient();
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      });
-
-      if (error || !data.session || !data.user) {
-        logger.warn(
-          `OAuth sign-in failed: ${sanitizeErrorMessage(error?.message || 'Invalid credentials')}`
-        );
-        if (wantsJson) {
-          res.status(401).json({
-            error: 'invalid_grant',
-            message: 'Invalid email or password. Please try again.',
-          });
-          return;
-        }
-        res.setHeader('Content-Type', 'text/html; charset=utf-8');
-        res.status(401).send(
-          renderAuthorizeHtml({
-            clientId: client_id,
-            redirectUri: redirect_uri,
-            scope: scope || 'gmail offline_access',
-            state: state || '',
-            codeChallenge: code_challenge,
-            codeChallengeMethod: code_challenge_method || 'S256',
-            errorMessage: 'Invalid email or password. Please try again.',
-          })
-        );
-        return;
-      }
-
-      authUser = {
-        userId: data.user.id,
-        email: data.user.email || email,
-        accessToken: data.session.access_token,
-        refreshToken: data.session.refresh_token,
-      };
-    }
-
-    // Generate time-limited (5 min) authorization code
+    // Generate 5-minute single-use authorization code
     const authCode = createAuthorizationCode({
-      userId: authUser.userId,
-      email: authUser.email,
+      installationId,
+      userId: installationId,
       clientId: client_id,
       redirectUri: redirect_uri,
       codeChallenge: code_challenge,
@@ -399,8 +284,6 @@ export async function handleAuthorizeSubmit(req: Request, res: Response): Promis
       scope: scope || 'gmail offline_access',
       expiresAt: Date.now() + 5 * 60 * 1000,
       nonce: crypto.randomUUID(),
-      supabaseAccessToken: authUser.accessToken,
-      supabaseRefreshToken: authUser.refreshToken,
     });
 
     // Build redirect target URL with code and original state
@@ -410,6 +293,8 @@ export async function handleAuthorizeSubmit(req: Request, res: Response): Promis
       redirectUrl.searchParams.set('state', state);
     }
 
+    logger.info(`Issued MCP authorization code for new installation [${installationId}]`);
+
     if (wantsJson) {
       res.status(200).json({ redirectUrl: redirectUrl.toString() });
       return;
@@ -418,26 +303,18 @@ export async function handleAuthorizeSubmit(req: Request, res: Response): Promis
     res.redirect(302, redirectUrl.toString());
   } catch (err) {
     const safeError = sanitizeErrorMessage(err);
-    const isAuthFailure =
-      safeError.toLowerCase().includes('invalid') ||
-      safeError.toLowerCase().includes('credential') ||
-      safeError.toLowerCase().includes('password') ||
-      safeError.toLowerCase().includes('login');
-    const status = isAuthFailure ? 401 : 500;
-    const userMessage = isAuthFailure
-      ? 'Invalid email or password. Please try again.'
-      : 'An unexpected authentication error occurred.';
+    logger.error(`OAuth authorize error: ${safeError}`);
 
-    logger.warn(`OAuth authorize error [${status}]: ${safeError}`);
     if (wantsJson) {
-      res.status(status).json({
-        error: isAuthFailure ? 'invalid_grant' : 'server_error',
-        message: userMessage,
+      res.status(500).json({
+        error: 'server_error',
+        message: 'An unexpected authorization error occurred.',
       });
       return;
     }
+
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
-    res.status(status).send(
+    res.status(500).send(
       renderAuthorizeHtml({
         clientId: client_id,
         redirectUri: redirect_uri,
@@ -445,40 +322,42 @@ export async function handleAuthorizeSubmit(req: Request, res: Response): Promis
         state: state || '',
         codeChallenge: code_challenge,
         codeChallengeMethod: code_challenge_method || 'S256',
-        errorMessage: userMessage,
+        errorMessage: 'An unexpected authorization error occurred.',
       })
     );
   }
 }
 
 /**
- * Handles Token Exchange
+ * Handles OAuth 2.1 token exchange with PKCE verification
  * POST /oauth/token
  */
 export async function handleTokenExchange(req: Request, res: Response): Promise<void> {
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Pragma', 'no-cache');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-
-  if (req.method === 'OPTIONS') {
-    res.status(204).end();
-    return;
-  }
+  res.setHeader('Content-Type', 'application/json; charset=utf-8');
 
   const grantType = req.body['grant_type'];
 
   if (grantType === 'authorization_code') {
     const code = req.body['code'];
-    const codeVerifier = req.body['code_verifier'];
     const redirectUri = req.body['redirect_uri'];
     const clientId = req.body['client_id'];
+    const codeVerifier = req.body['code_verifier'];
 
-    if (!code || !codeVerifier) {
+    if (!code) {
       res.status(400).json({
         error: 'invalid_request',
-        error_description: 'Missing code or code_verifier parameter',
+        error_description: 'Missing code parameter',
+      });
+      return;
+    }
+
+    if (!codeVerifier) {
+      res.status(400).json({
+        error: 'invalid_request',
+        error_description: 'Missing code_verifier parameter (PKCE S256 required)',
       });
       return;
     }
@@ -486,9 +365,9 @@ export async function handleTokenExchange(req: Request, res: Response): Promise<
     let payload: AuthorizationCodePayload;
     try {
       payload = verifyAuthorizationCode(code);
-    } catch (err) {
+    } catch (err: unknown) {
       const msg = sanitizeErrorMessage(err);
-      logger.warn(`Authorization code verification failed: ${msg}`);
+      logger.warn(`OAuth token exchange rejected: ${msg}`);
       res.status(400).json({
         error: 'invalid_grant',
         error_description: msg,
@@ -496,32 +375,18 @@ export async function handleTokenExchange(req: Request, res: Response): Promise<
       return;
     }
 
-    // Verify PKCE S256
-    if (!verifyPkceS256(codeVerifier, payload.codeChallenge)) {
-      logger.warn('OAuth token exchange rejected: PKCE code_verifier does not match challenge');
+    // Verify redirect_uri matches
+    if (redirectUri && payload.redirectUri !== redirectUri) {
+      logger.warn('OAuth token exchange rejected: redirect_uri mismatch');
       res.status(400).json({
         error: 'invalid_grant',
-        error_description: 'PKCE verification failed: code_verifier does not match challenge',
+        error_description: 'redirect_uri does not match authorization request',
       });
       return;
     }
 
-    // Verify redirect_uri match if provided
-    if (redirectUri && payload.redirectUri) {
-      const normProvided = redirectUri.replace(/\/+$/, '');
-      const normPayload = payload.redirectUri.replace(/\/+$/, '');
-      if (normProvided !== normPayload) {
-        logger.warn('OAuth token exchange rejected: redirect_uri mismatch');
-        res.status(400).json({
-          error: 'invalid_grant',
-          error_description: 'redirect_uri does not match authorization request',
-        });
-        return;
-      }
-    }
-
-    // Verify client_id match if provided
-    if (clientId && payload.clientId && clientId !== payload.clientId) {
+    // Verify client_id matches
+    if (clientId && payload.clientId !== clientId) {
       logger.warn('OAuth token exchange rejected: client_id mismatch');
       res.status(400).json({
         error: 'invalid_grant',
@@ -530,21 +395,34 @@ export async function handleTokenExchange(req: Request, res: Response): Promise<
       return;
     }
 
-    // Consume nonce to guarantee single-use replay protection
-    consumeAuthorizationCodeNonce(payload.nonce);
-
-    // Issue refresh token if offline_access is supported
-    let refreshToken: string | undefined = undefined;
-    if (payload.supabaseRefreshToken) {
-      refreshToken = createEncryptedRefreshToken({
-        userId: payload.userId,
-        supabaseRefreshToken: payload.supabaseRefreshToken,
-        createdAt: Date.now(),
+    // Verify PKCE S256 challenge
+    const pkceValid = verifyPkceS256(codeVerifier, payload.codeChallenge);
+    if (!pkceValid) {
+      logger.warn('OAuth token exchange rejected: PKCE S256 verification failed');
+      res.status(400).json({
+        error: 'invalid_grant',
+        error_description: 'PKCE S256 verification failed',
       });
+      return;
     }
 
+    // Mark authorization code consumed (replay protection)
+    consumeAuthorizationCodeNonce(payload.nonce);
+
+    // Issue OUR OWN MCP access token containing installation identity
+    const installationId = payload.installationId || payload.userId;
+    const accessToken = await createMcpAccessToken(installationId);
+
+    // Create encrypted refresh token bound to installationId
+    const refreshToken = createEncryptedRefreshToken({
+      installationId,
+      createdAt: Date.now(),
+    });
+
+    logger.info(`Issued MCP Bearer access token for installation [${installationId}]`);
+
     res.status(200).json({
-      access_token: payload.supabaseAccessToken,
+      access_token: accessToken,
       token_type: 'Bearer',
       expires_in: 3600,
       refresh_token: refreshToken,
@@ -575,62 +453,21 @@ export async function handleTokenExchange(req: Request, res: Response): Promise<
       return;
     }
 
-    try {
-      let newTokens: {
-        userId: string;
-        accessToken: string;
-        refreshToken?: string;
-      };
+    const installationId = tokenData.installationId;
+    const newAccessToken = await createMcpAccessToken(installationId);
+    const newRefreshToken = createEncryptedRefreshToken({
+      installationId,
+      createdAt: Date.now(),
+    });
 
-      if (testRefreshHandler) {
-        newTokens = await testRefreshHandler(tokenData.supabaseRefreshToken);
-      } else {
-        const supabase = getSupabaseClient();
-        const { data, error } = await supabase.auth.refreshSession({
-          refresh_token: tokenData.supabaseRefreshToken,
-        });
-
-        if (error || !data.session || !data.user) {
-          logger.warn(
-            `OAuth token refresh failed: ${sanitizeErrorMessage(error?.message || 'Refresh error')}`
-          );
-          res.status(400).json({
-            error: 'invalid_grant',
-            error_description: 'Failed to refresh authentication session',
-          });
-          return;
-        }
-
-        newTokens = {
-          userId: data.user.id,
-          accessToken: data.session.access_token,
-          refreshToken: data.session.refresh_token,
-        };
-      }
-
-      const newEncryptedRefreshToken = createEncryptedRefreshToken({
-        userId: newTokens.userId,
-        supabaseRefreshToken: newTokens.refreshToken || tokenData.supabaseRefreshToken,
-        createdAt: Date.now(),
-      });
-
-      res.status(200).json({
-        access_token: newTokens.accessToken,
-        token_type: 'Bearer',
-        expires_in: 3600,
-        refresh_token: newEncryptedRefreshToken,
-        scope: 'gmail offline_access',
-      });
-      return;
-    } catch (err) {
-      const msg = sanitizeErrorMessage(err);
-      logger.error(`Error during token refresh: ${msg}`);
-      res.status(400).json({
-        error: 'invalid_grant',
-        error_description: 'Could not refresh token',
-      });
-      return;
-    }
+    res.status(200).json({
+      access_token: newAccessToken,
+      token_type: 'Bearer',
+      expires_in: 3600,
+      refresh_token: newRefreshToken,
+      scope: 'gmail offline_access',
+    });
+    return;
   }
 
   res.status(400).json({
@@ -640,7 +477,7 @@ export async function handleTokenExchange(req: Request, res: Response): Promise<
 }
 
 // ---------------------------------------------------------------------------
-// HTML Render Helper
+// HTML Render Helper (Clean ChatGPT MCP Authorization Page)
 // ---------------------------------------------------------------------------
 
 interface AuthorizePageData {
@@ -684,119 +521,131 @@ function renderAuthorizeHtml(data: AuthorizePageData): string {
       color: var(--text);
       min-height: 100vh;
       display: flex;
-      flex-direction: column;
       align-items: center;
       justify-content: center;
       padding: 1.5rem;
     }
     .card {
       background: var(--card-bg);
-      backdrop-filter: blur(12px);
+      backdrop-filter: blur(16px);
       border: 1px solid var(--card-border);
-      border-radius: 1rem;
+      border-radius: 1.25rem;
       padding: 2.25rem;
-      max-width: 440px;
+      max-width: 460px;
       width: 100%;
-      box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+      box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.6);
     }
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.3rem 0.75rem;
-      border-radius: 9999px;
-      background: rgba(56, 189, 248, 0.1);
-      border: 1px solid rgba(56, 189, 248, 0.25);
-      color: var(--accent);
-      font-size: 0.75rem;
-      font-weight: 600;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      margin-bottom: 1rem;
+    .header {
+      text-align: center;
+      margin-bottom: 1.75rem;
     }
-    h1 {
-      font-size: 1.6rem;
-      font-weight: 700;
-      margin: 0 0 0.5rem;
-      background: var(--accent-gradient);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-    }
-    p {
-      color: var(--text-muted);
-      font-size: 0.92rem;
-      line-height: 1.5;
-      margin: 0 0 1.5rem;
-    }
-    .alert-error {
-      background: var(--error-bg);
-      border: 1px solid var(--error-border);
-      color: var(--error-text);
-      padding: 0.75rem 1rem;
-      border-radius: 0.5rem;
-      font-size: 0.85rem;
-      margin-bottom: 1.25rem;
-    }
-    .form-group {
-      margin-bottom: 1.2rem;
-    }
-    label {
-      display: block;
-      font-size: 0.82rem;
-      font-weight: 500;
-      color: var(--text-muted);
-      margin-bottom: 0.4rem;
-    }
-    input[type="email"], input[type="password"] {
-      width: 100%;
-      background: rgba(15, 23, 42, 0.7);
-      border: 1px solid var(--card-border);
-      border-radius: 0.5rem;
-      padding: 0.75rem 1rem;
-      color: var(--text);
-      font-size: 0.95rem;
-      outline: none;
-      transition: border-color 0.2s;
-    }
-    input[type="email"]:focus, input[type="password"]:focus {
-      border-color: var(--accent);
-    }
-    .btn {
-      width: 100%;
+    .logo {
       display: inline-flex;
       align-items: center;
       justify-content: center;
+      width: 52px;
+      height: 52px;
+      border-radius: 14px;
+      background: rgba(56, 189, 248, 0.12);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+      margin-bottom: 1rem;
+      font-size: 1.5rem;
+    }
+    h1 {
+      font-size: 1.4rem;
+      font-weight: 700;
+      margin: 0 0 0.5rem;
+    }
+    .desc {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      line-height: 1.45;
+      margin: 0;
+    }
+    .client-badge {
+      display: inline-block;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 6px;
+      padding: 0.2rem 0.5rem;
+      font-family: monospace;
+      font-size: 0.8rem;
+      color: #cbd5e1;
+      margin-top: 0.5rem;
+    }
+    .permissions-box {
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid var(--card-border);
+      border-radius: 0.75rem;
+      padding: 1rem 1.25rem;
+      margin: 1.5rem 0;
+    }
+    .permissions-title {
+      font-size: 0.8rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--text-muted);
+      margin-bottom: 0.75rem;
+    }
+    .permission-item {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      font-size: 0.88rem;
+      color: #e2e8f0;
+      margin-bottom: 0.5rem;
+    }
+    .permission-item:last-child { margin-bottom: 0; }
+    .check {
+      color: #38bdf8;
+      font-weight: bold;
+    }
+    .btn {
+      width: 100%;
       background: var(--accent-gradient);
       color: #041020;
       font-weight: 600;
-      padding: 0.8rem 1.5rem;
-      border-radius: 0.6rem;
-      text-decoration: none;
-      font-size: 0.95rem;
-      cursor: pointer;
+      padding: 0.85rem;
+      border-radius: 0.65rem;
       border: none;
-      margin-top: 0.5rem;
-      transition: opacity 0.2s;
+      cursor: pointer;
+      font-size: 0.98rem;
+      transition: opacity 0.2s, transform 0.1s;
     }
     .btn:hover {
       opacity: 0.92;
+      transform: translateY(-1px);
     }
-    .meta-box {
-      margin-top: 1.5rem;
-      padding-top: 1rem;
-      border-top: 1px solid var(--card-border);
-      font-size: 0.75rem;
+    .footer {
+      text-align: center;
+      margin-top: 1.25rem;
+      font-size: 0.8rem;
       color: var(--text-muted);
     }
   </style>
 </head>
 <body>
   <div class="card">
-    <div class="badge">Model Context Protocol</div>
-    <h1>Authorize ChatGPT</h1>
-    <p>Sign in with your account to authorize ChatGPT to interact with your personal Gmail mailbox.</p>
+    <div class="header">
+      <div class="logo">📬</div>
+      <h1>Connect Gmail to ChatGPT</h1>
+      <p class="desc">Authorize ChatGPT to securely interact with your Gmail MCP Server.</p>
+      <div class="client-badge">${escapeHtml(data.clientId)}</div>
+    </div>
 
-    <div id="alert-box" class="alert-error" style="${data.errorMessage ? '' : 'display:none;'}">${data.errorMessage || ''}</div>
+    ${
+      data.errorMessage
+        ? `<div style="background: var(--error-bg); border: 1px solid var(--error-border); color: var(--error-text); padding: 0.75rem; border-radius: 0.5rem; margin-bottom: 1rem; font-size: 0.85rem;">${escapeHtml(data.errorMessage)}</div>`
+        : ''
+    }
+
+    <div class="permissions-box">
+      <div class="permissions-title">Requested Capabilities</div>
+      <div class="permission-item"><span class="check">✓</span> Read Gmail messages, threads & search</div>
+      <div class="permission-item"><span class="check">✓</span> Compose, reply, and draft emails</div>
+      <div class="permission-item"><span class="check">✓</span> Organize labels, archives & filters</div>
+    </div>
 
     <form method="POST" action="/oauth/authorize">
       <input type="hidden" name="client_id" value="${escapeHtml(data.clientId)}">
@@ -805,89 +654,13 @@ function renderAuthorizeHtml(data: AuthorizePageData): string {
       <input type="hidden" name="state" value="${escapeHtml(data.state)}">
       <input type="hidden" name="code_challenge" value="${escapeHtml(data.codeChallenge)}">
       <input type="hidden" name="code_challenge_method" value="${escapeHtml(data.codeChallengeMethod)}">
-
-      <div class="form-group">
-        <label for="email">Account Email</label>
-        <input type="email" id="email" name="email" required autocomplete="email" placeholder="you@example.com">
-      </div>
-
-      <div class="form-group">
-        <label for="password">Supabase Account Password</label>
-        <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="••••••••">
-        <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.35rem;">Enter your Supabase Auth account password (not your Google password).</div>
-      </div>
-
-      <button type="submit" id="submit-btn" class="btn">
-        <span id="btn-text">Authorize ChatGPT →</span>
-      </button>
+      <button type="submit" class="btn">Authorize ChatGPT</button>
     </form>
 
-    <div class="meta-box">
-      <div><strong>Client ID:</strong> ${escapeHtml(data.clientId)}</div>
-      <div style="margin-top: 0.25rem;"><strong>Scope:</strong> ${escapeHtml(data.scope)}</div>
+    <div class="footer">
+      Credentials are encrypted with AES-256-GCM. Personal data is never logged.
     </div>
   </div>
-
-  <script>
-    (function() {
-      const form = document.querySelector('form');
-      const submitBtn = document.getElementById('submit-btn');
-      const btnText = document.getElementById('btn-text');
-      const alertBox = document.getElementById('alert-box');
-
-      function showError(msg) {
-        alertBox.textContent = msg;
-        alertBox.style.display = 'block';
-        submitBtn.disabled = false;
-        btnText.textContent = 'Authorize ChatGPT →';
-      }
-
-      function setLoading(msg) {
-        submitBtn.disabled = true;
-        btnText.textContent = msg;
-        alertBox.style.display = 'none';
-      }
-
-      form.addEventListener('submit', async function(e) {
-        e.preventDefault();
-        setLoading('Authorizing ChatGPT...');
-
-        const formData = new FormData(form);
-        const body = new URLSearchParams();
-        for (const [key, value] of formData.entries()) {
-          body.append(key, value);
-        }
-
-        try {
-          const res = await fetch('/oauth/authorize', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/x-www-form-urlencoded',
-              'Accept': 'application/json',
-              'X-Requested-With': 'XMLHttpRequest'
-            },
-            body: body.toString()
-          });
-
-          const data = await res.json().catch(function() { return {}; });
-
-          if (!res.ok) {
-            showError(data.message || data.error_description || 'Invalid email or password. Please try again.');
-            return;
-          }
-
-          if (data.redirectUrl) {
-            setLoading('Redirecting to ChatGPT...');
-            window.location.href = data.redirectUrl;
-          } else {
-            showError('Received invalid response from server.');
-          }
-        } catch (err) {
-          showError('A network error occurred. Please try again.');
-        }
-      });
-    })();
-  </script>
 </body>
 </html>`;
 }
@@ -898,5 +671,5 @@ function escapeHtml(str: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#039;');
+    .replace(/'/g, '&#39;');
 }

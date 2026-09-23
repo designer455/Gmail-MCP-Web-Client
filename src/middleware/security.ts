@@ -15,7 +15,7 @@ export const securityHeaders = helmet({
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       imgSrc: ["'self'", 'data:', 'https://*.googleusercontent.com'],
-      connectSrc: ["'self'", 'https://*.supabase.co'],
+      connectSrc: ["'self'"],
       formAction: ["'self'", '*'],
     },
   },

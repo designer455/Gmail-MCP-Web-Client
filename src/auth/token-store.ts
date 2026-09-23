@@ -2,51 +2,70 @@
  * ============================================================================
  * TOKEN STORE ABSTRACTION
  * ============================================================================
- * Defines the contract for storing and retrieving Google OAuth2 credentials per user.
- *
- * NOTE FOR PHASE 1:
- * MemoryTokenStore below is strictly for:
- * [ NON-PRODUCTION TOKEN STORAGE - DEVELOPMENT / TESTING ONLY ]
- *
- * In Phase 2, a persistent encrypted database (e.g. Postgres / Supabase) will
- * implement this TokenStore interface without altering any Gmail or MCP business logic.
- * No tokens are stored on the Vercel filesystem, local JSON files, or browser storage.
+ * Defines the contract for storing and retrieving Google OAuth2 credentials per installation.
+ * Implemented using Vercel Blob persistent storage with AES-256-GCM encryption at rest.
  * ============================================================================
  */
 
+import {
+  OAuthCredentials,
+  saveGmailCredentials,
+  getGmailCredentials,
+  deleteGmailCredentials,
+  hasGmailCredentials,
+  isVercelBlobConfigured,
+  clearInMemoryCredentialStore,
+} from '../storage/gmail-credentials.js';
 import { encryptCredentials, decryptCredentials } from './crypto.js';
-import { SupabaseTokenStore } from './supabase-token-store.js';
-import { getEnv } from '../config/env.js';
-import { ConfigurationError } from '../utils/errors.js';
 
-export interface OAuthCredentials {
-  access_token?: string | null;
-  refresh_token?: string | null;
-  scope?: string | null;
-  token_type?: string | null;
-  expiry_date?: number | null;
-  emailAddress?: string | null;
-  googleAccountId?: string | null;
-}
+export type { OAuthCredentials };
 
 export interface TokenStore {
-  getUserCredentials(userId: string): Promise<OAuthCredentials | null>;
-  saveUserCredentials(userId: string, credentials: OAuthCredentials): Promise<void>;
-  deleteUserCredentials(userId: string): Promise<void>;
-  hasUserCredentials(userId: string): Promise<boolean>;
+  getUserCredentials(installationId: string): Promise<OAuthCredentials | null>;
+  saveUserCredentials(installationId: string, credentials: OAuthCredentials): Promise<void>;
+  deleteUserCredentials(installationId: string): Promise<void>;
+  hasUserCredentials(installationId: string): Promise<boolean>;
   getStoreType(): string;
 }
 
 /**
- * ============================================================================
- * [ NON-PRODUCTION TOKEN STORAGE ]
+ * Production-ready TokenStore backed by Vercel Blob (with in-memory fallback for test/dev).
+ */
+export class VercelBlobTokenStore implements TokenStore {
+  public async getUserCredentials(installationId: string): Promise<OAuthCredentials | null> {
+    return await getGmailCredentials(installationId);
+  }
+
+  public async saveUserCredentials(
+    installationId: string,
+    credentials: OAuthCredentials
+  ): Promise<void> {
+    await saveGmailCredentials(installationId, credentials);
+  }
+
+  public async deleteUserCredentials(installationId: string): Promise<void> {
+    await deleteGmailCredentials(installationId);
+  }
+
+  public async hasUserCredentials(installationId: string): Promise<boolean> {
+    return await hasGmailCredentials(installationId);
+  }
+
+  public getStoreType(): string {
+    return isVercelBlobConfigured()
+      ? 'production-vercel-blob (ENCRYPTED BLOB STORAGE)'
+      : 'development-blob-memory (NON-PRODUCTION TOKEN STORAGE)';
+  }
+
+  public clear(): void {
+    clearInMemoryCredentialStore();
+  }
+}
+
+/**
  * In-memory TokenStore for local development and test suites.
- * In a serverless deployment (Vercel), in-memory state is ephemeral.
- * Encrypts credentials in-memory using AES-256-GCM to validate cryptographic flow.
- * ============================================================================
  */
 export class MemoryTokenStore implements TokenStore {
-  // Map of userId -> encrypted credential payload
   private readonly store = new Map<string, string>();
 
   public async getUserCredentials(userId: string): Promise<OAuthCredentials | null> {
@@ -80,15 +99,12 @@ export class MemoryTokenStore implements TokenStore {
     return 'development-memory (NON-PRODUCTION TOKEN STORAGE)';
   }
 
-  /**
-   * Helper for testing/cleanup
-   */
   public clear(): void {
     this.store.clear();
+    clearInMemoryCredentialStore();
   }
 }
 
-// Global default token store instance (memoized or dynamically resolved)
 let activeTokenStore: TokenStore | null = null;
 
 export function getTokenStore(): TokenStore {
@@ -96,26 +112,7 @@ export function getTokenStore(): TokenStore {
     return activeTokenStore;
   }
 
-  const env = getEnv();
-
-  if (env.NODE_ENV === 'production') {
-    if (!env.SUPABASE_URL || !env.SUPABASE_SECRET_KEY) {
-      throw new ConfigurationError(
-        'Production environment requires SUPABASE_URL and SUPABASE_SECRET_KEY. Fallback to in-memory store is forbidden.'
-      );
-    }
-    activeTokenStore = new SupabaseTokenStore();
-    return activeTokenStore;
-  }
-
-  // In development, use SupabaseTokenStore if credentials are provided in .env
-  if (env.NODE_ENV === 'development' && env.SUPABASE_URL && env.SUPABASE_SECRET_KEY) {
-    activeTokenStore = new SupabaseTokenStore();
-    return activeTokenStore;
-  }
-
-  // Development / Test default fallback
-  activeTokenStore = new MemoryTokenStore();
+  activeTokenStore = new VercelBlobTokenStore();
   return activeTokenStore;
 }
 

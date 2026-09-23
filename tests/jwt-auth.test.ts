@@ -37,9 +37,6 @@ describe('Phase 4 — Authentication Hardening Tests', () => {
   beforeAll(async () => {
     process.env.NODE_ENV = 'test';
     process.env.PORT = String(PORT);
-    process.env.SUPABASE_URL = 'https://svqtutugnahwivpywysq.supabase.co';
-    process.env.SUPABASE_JWKS_URL =
-      'https://svqtutugnahwivpywysq.supabase.co/auth/v1/.well-known/jwks.json';
 
     await initTestJwks();
 
@@ -88,10 +85,10 @@ describe('Phase 4 — Authentication Hardening Tests', () => {
 
   // 2. Valid JWT resolves correct `sub`
   it('2. Valid JWT resolves correct subject (`sub`) as user identity', async () => {
-    const customSub = 'supabase-uuid-9988-7766';
+    const customSub = 'installation-id-9988-7766';
     const token = await createTestJwt({
       sub: customSub,
-      email: 'tester@supabase.co',
+      email: 'tester@example.com',
     });
 
     const verified = await verifyJwt(token);
@@ -132,7 +129,7 @@ describe('Phase 4 — Authentication Hardening Tests', () => {
 
     await expect(
       verifyJwt(wrongIssuerToken, {
-        issuer: 'https://svqtutugnahwivpywysq.supabase.co/auth/v1',
+        issuer: 'https://gmail-mcp-web-client.vercel.app',
       })
     ).rejects.toThrow(/claim: iss/);
   });
@@ -530,7 +527,7 @@ describe('Phase 4 — Authentication Hardening Tests', () => {
     });
 
     it('C. GET /auth/login with valid JWT and Accept: application/json returns HTTP 200 JSON with OAuth URL', async () => {
-      const testUserId = 'test-supabase-user-5b';
+      const testUserId = 'test-installation-user-5b';
       const token = await createTestJwt({ sub: testUserId, email: 'test5b@example.com' });
 
       const res = await fetch(`${BASE_URL}/auth/login`, {
@@ -583,13 +580,12 @@ describe('Phase 4 — Authentication Hardening Tests', () => {
       expect(res.status).toBe(200);
       expect(res.headers.get('content-type')).toContain('text/html');
       const html = await res.text();
-      expect(html).toContain('Connect Gmail Account');
-      expect(html).toContain('login-form');
-      expect(html).toContain('type="email"');
-      expect(html).toContain('type="password"');
+      expect(html).toContain('Connect Gmail');
+      // Users must NOT enter password or email
+      expect(html).not.toContain('type="password"');
     });
 
-    it('F. Does NOT expose Supabase JWT in page URL, query strings, or redirect responses', async () => {
+    it('F. Does NOT expose Bearer token in page URL, query strings, or redirect responses', async () => {
       const testUserId = 'secret-jwt-user';
       const token = await createTestJwt({ sub: testUserId });
 

@@ -12,6 +12,7 @@ const envSchema = z
       .string()
       .url('GOOGLE_REDIRECT_URI must be a valid URL')
       .default('https://gmail-mcp-web-client.vercel.app/api/auth/callback'),
+    GMAIL_TOKEN_ENCRYPTION_KEY: z.string().min(32).optional(),
     ENCRYPTION_KEY: z
       .string()
       .min(32, 'ENCRYPTION_KEY must be at least 32 characters long for AES-256-GCM')
@@ -20,37 +21,18 @@ const envSchema = z
       .string()
       .min(16, 'MCP_AUTH_SECRET must be at least 16 characters long')
       .default('default_mcp_auth_secret_dev_32chars!'),
+    BLOB_READ_WRITE_TOKEN: z.string().min(1).optional(),
     NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
     PORT: z.coerce.number().default(3000),
-    SUPABASE_URL: z.string().url('SUPABASE_URL must be a valid URL').optional(),
-    SUPABASE_SECRET_KEY: z.string().min(1, 'SUPABASE_SECRET_KEY cannot be empty').optional(),
-    SUPABASE_PUBLISHABLE_KEY: z.string().optional(),
-    SUPABASE_JWKS_URL: z.string().url('SUPABASE_JWKS_URL must be a valid URL').optional(),
   })
-  .superRefine((data, ctx) => {
-    if (data.NODE_ENV === 'production') {
-      if (!data.SUPABASE_URL) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'SUPABASE_URL is required in production environment',
-          path: ['SUPABASE_URL'],
-        });
-      }
-      if (!data.SUPABASE_SECRET_KEY) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'SUPABASE_SECRET_KEY is required in production environment',
-          path: ['SUPABASE_SECRET_KEY'],
-        });
-      }
-      if (!data.SUPABASE_JWKS_URL) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'SUPABASE_JWKS_URL is required in production environment',
-          path: ['SUPABASE_JWKS_URL'],
-        });
-      }
-    }
+  .transform((data) => {
+    // Resolve active encryption key preferring GMAIL_TOKEN_ENCRYPTION_KEY over ENCRYPTION_KEY
+    const activeKey = data.GMAIL_TOKEN_ENCRYPTION_KEY || data.ENCRYPTION_KEY;
+    return {
+      ...data,
+      ENCRYPTION_KEY: activeKey,
+      GMAIL_TOKEN_ENCRYPTION_KEY: activeKey,
+    };
   });
 
 export type EnvConfig = z.infer<typeof envSchema>;
@@ -90,10 +72,11 @@ export function getEnv(): EnvConfig {
           ENCRYPTION_KEY:
             process.env.ENCRYPTION_KEY ||
             '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+          GMAIL_TOKEN_ENCRYPTION_KEY:
+            process.env.GMAIL_TOKEN_ENCRYPTION_KEY ||
+            process.env.ENCRYPTION_KEY ||
+            '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
           MCP_AUTH_SECRET: process.env.MCP_AUTH_SECRET || 'test_mcp_auth_secret_key_123456789',
-          SUPABASE_JWKS_URL:
-            process.env.SUPABASE_JWKS_URL ||
-            'https://svqtutugnahwivpywysq.supabase.co/auth/v1/.well-known/jwks.json',
           NODE_ENV: 'test',
           PORT: '3000',
         }
