@@ -290,6 +290,10 @@ export function renderAuthorizePage(req: Request, res: Response): void {
  * POST /oauth/authorize
  */
 export async function handleAuthorizeSubmit(req: Request, res: Response): Promise<void> {
+  const wantsJson =
+    req.headers['x-requested-with'] === 'XMLHttpRequest' ||
+    req.headers['accept'] === 'application/json';
+
   const {
     email,
     password,
@@ -310,6 +314,13 @@ export async function handleAuthorizeSubmit(req: Request, res: Response): Promis
   }
 
   if (!email || !password) {
+    if (wantsJson) {
+      res.status(400).json({
+        error: 'invalid_request',
+        message: 'Email and password are required',
+      });
+      return;
+    }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.status(400).send(
       renderAuthorizeHtml({
@@ -347,6 +358,13 @@ export async function handleAuthorizeSubmit(req: Request, res: Response): Promis
         logger.warn(
           `OAuth sign-in failed: ${sanitizeErrorMessage(error?.message || 'Invalid credentials')}`
         );
+        if (wantsJson) {
+          res.status(401).json({
+            error: 'invalid_grant',
+            message: 'Invalid email or password. Please try again.',
+          });
+          return;
+        }
         res.setHeader('Content-Type', 'text/html; charset=utf-8');
         res.status(401).send(
           renderAuthorizeHtml({
@@ -392,6 +410,11 @@ export async function handleAuthorizeSubmit(req: Request, res: Response): Promis
       redirectUrl.searchParams.set('state', state);
     }
 
+    if (wantsJson) {
+      res.status(200).json({ redirectUrl: redirectUrl.toString() });
+      return;
+    }
+
     res.redirect(302, redirectUrl.toString());
   } catch (err) {
     const safeError = sanitizeErrorMessage(err);
@@ -406,6 +429,13 @@ export async function handleAuthorizeSubmit(req: Request, res: Response): Promis
       : 'An unexpected authentication error occurred.';
 
     logger.warn(`OAuth authorize error [${status}]: ${safeError}`);
+    if (wantsJson) {
+      res.status(status).json({
+        error: isAuthFailure ? 'invalid_grant' : 'server_error',
+        message: userMessage,
+      });
+      return;
+    }
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.status(status).send(
       renderAuthorizeHtml({
@@ -766,7 +796,7 @@ function renderAuthorizeHtml(data: AuthorizePageData): string {
     <h1>Authorize ChatGPT</h1>
     <p>Sign in with your account to authorize ChatGPT to interact with your personal Gmail mailbox.</p>
 
-    ${data.errorMessage ? `<div class="alert-error">${data.errorMessage}</div>` : ''}
+    <div id="alert-box" class="alert-error" style="${data.errorMessage ? '' : 'display:none;'}">${data.errorMessage || ''}</div>
 
     <form method="POST" action="/oauth/authorize">
       <input type="hidden" name="client_id" value="${escapeHtml(data.clientId)}">
@@ -782,11 +812,14 @@ function renderAuthorizeHtml(data: AuthorizePageData): string {
       </div>
 
       <div class="form-group">
-        <label for="password">Password</label>
+        <label for="password">Supabase Account Password</label>
         <input type="password" id="password" name="password" required autocomplete="current-password" placeholder="••••••••">
+        <div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 0.35rem;">Enter your Supabase Auth account password (not your Google password).</div>
       </div>
 
-      <button type="submit" class="btn">Authorize ChatGPT →</button>
+      <button type="submit" id="submit-btn" class="btn">
+        <span id="btn-text">Authorize ChatGPT →</span>
+      </button>
     </form>
 
     <div class="meta-box">
@@ -794,6 +827,67 @@ function renderAuthorizeHtml(data: AuthorizePageData): string {
       <div style="margin-top: 0.25rem;"><strong>Scope:</strong> ${escapeHtml(data.scope)}</div>
     </div>
   </div>
+
+  <script>
+    (function() {
+      const form = document.querySelector('form');
+      const submitBtn = document.getElementById('submit-btn');
+      const btnText = document.getElementById('btn-text');
+      const alertBox = document.getElementById('alert-box');
+
+      function showError(msg) {
+        alertBox.textContent = msg;
+        alertBox.style.display = 'block';
+        submitBtn.disabled = false;
+        btnText.textContent = 'Authorize ChatGPT →';
+      }
+
+      function setLoading(msg) {
+        submitBtn.disabled = true;
+        btnText.textContent = msg;
+        alertBox.style.display = 'none';
+      }
+
+      form.addEventListener('submit', async function(e) {
+        e.preventDefault();
+        setLoading('Authorizing ChatGPT...');
+
+        const formData = new FormData(form);
+        const body = new URLSearchParams();
+        for (const [key, value] of formData.entries()) {
+          body.append(key, value);
+        }
+
+        try {
+          const res = await fetch('/oauth/authorize', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Accept': 'application/json',
+              'X-Requested-With': 'XMLHttpRequest'
+            },
+            body: body.toString()
+          });
+
+          const data = await res.json().catch(function() { return {}; });
+
+          if (!res.ok) {
+            showError(data.message || data.error_description || 'Invalid email or password. Please try again.');
+            return;
+          }
+
+          if (data.redirectUrl) {
+            setLoading('Redirecting to ChatGPT...');
+            window.location.href = data.redirectUrl;
+          } else {
+            showError('Received invalid response from server.');
+          }
+        } catch (err) {
+          showError('A network error occurred. Please try again.');
+        }
+      });
+    })();
+  </script>
 </body>
 </html>`;
 }

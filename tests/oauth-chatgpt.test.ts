@@ -269,6 +269,62 @@ describe('Phase 7 — ChatGPT OAuth Compatibility Tests', () => {
       expect(html).toContain('Invalid email or password');
       expect(res.headers.get('location')).toBeNull();
     });
+
+    it('8b. POST /oauth/authorize via AJAX (X-Requested-With) returns JSON with redirectUrl on success and 401 JSON on failure', async () => {
+      const { challenge } = generatePkce();
+      const redirectUri = 'https://chatgpt.com/aip/callback';
+
+      // 1. Success case with AJAX
+      const successRes = await fetch(`${BASE_URL}/oauth/authorize`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Requested-With': 'XMLHttpRequest',
+          Accept: 'application/json',
+        },
+        body: new URLSearchParams({
+          email: 'user-a@example.com',
+          password: 'valid-password',
+          client_id: 'chatgpt-client',
+          redirect_uri: redirectUri,
+          scope: 'gmail',
+          state: 'ajax-state-1',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+        }).toString(),
+      });
+
+      expect(successRes.status).toBe(200);
+      const successData = await successRes.json();
+      expect(successData.redirectUrl).toBeDefined();
+      expect(successData.redirectUrl).toContain(redirectUri);
+      expect(successData.redirectUrl).toContain('code=');
+      expect(successData.redirectUrl).toContain('state=ajax-state-1');
+
+      // 2. Failure case with AJAX
+      const failRes = await fetch(`${BASE_URL}/oauth/authorize`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'X-Requested-With': 'XMLHttpRequest',
+          Accept: 'application/json',
+        },
+        body: new URLSearchParams({
+          email: 'user-a@example.com',
+          password: 'wrong-password',
+          client_id: 'chatgpt-client',
+          redirect_uri: redirectUri,
+          scope: 'gmail',
+          code_challenge: challenge,
+          code_challenge_method: 'S256',
+        }).toString(),
+      });
+
+      expect(failRes.status).toBe(401);
+      const failData = await failRes.json();
+      expect(failData.error).toBe('invalid_grant');
+      expect(failData.message).toContain('Invalid email or password');
+    });
   });
 
   // =========================================================================
