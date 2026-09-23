@@ -17,6 +17,13 @@ import {
 import { rateLimiter } from './middleware/rate-limit.js';
 import { logger } from './utils/logger.js';
 import { sanitizeErrorMessage } from './utils/errors.js';
+import {
+  getProtectedResourceMetadata,
+  getAuthorizationServerMetadata,
+  renderAuthorizePage,
+  handleAuthorizeSubmit,
+  handleTokenExchange,
+} from './auth/oauth-server.js';
 
 export interface AppOptions {
   protectMcp?: boolean;
@@ -316,6 +323,24 @@ export function createApp(options: AppOptions = {}): express.Application {
       tokenStore: tokenStore.getStoreType(),
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // RFC 9728 — OAuth 2.0 Protected Resource Metadata (for MCP & ChatGPT discovery)
+  app.get('/.well-known/oauth-protected-resource', getProtectedResourceMetadata);
+  app.get('/.well-known/oauth-protected-resource/mcp', getProtectedResourceMetadata);
+
+  // RFC 8414 — OAuth 2.0 Authorization Server Metadata
+  app.get('/.well-known/oauth-authorization-server', getAuthorizationServerMetadata);
+
+  // OAuth 2.1 Authorization & Token endpoints (for ChatGPT MCP connector flow)
+  app.get('/oauth/authorize', renderAuthorizePage);
+  app.post('/oauth/authorize', handleAuthorizeSubmit);
+  app.post('/oauth/token', handleTokenExchange);
+  app.options('/oauth/token', (_req: Request, res: Response) => {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.status(204).end();
   });
 
   // Public browser authentication page: Supabase Auth -> Google OAuth bridge

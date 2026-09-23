@@ -110,7 +110,14 @@ export async function requireAuthMiddleware(
 ): Promise<void> {
   const authHeader = req.headers['authorization'];
   if (!authHeader) {
-    res.setHeader('WWW-Authenticate', 'Bearer');
+    const host = req.get('host') || 'gmail-mcp-web-client.vercel.app';
+    const proto =
+      req.protocol === 'http' && (host.includes('localhost') || host.includes('127.0.0.1'))
+        ? 'http'
+        : 'https';
+    const metadataUrl = `${proto}://${host}/.well-known/oauth-protected-resource`;
+
+    res.setHeader('WWW-Authenticate', `Bearer resource_metadata="${metadataUrl}"`);
     res.status(401).json({
       error: 'Unauthorized',
       message: 'Authentication required. Missing Authorization header.',
