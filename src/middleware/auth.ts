@@ -118,6 +118,20 @@ export async function requireAuthMiddleware(
     return;
   }
 
+  const trimmed = authHeader.trim();
+  const lower = trimmed.toLowerCase();
+
+  // If Authorization header exists, it MUST match the Bearer scheme
+  if (!lower.startsWith('bearer ') && !lower.startsWith('bearer\t') && lower !== 'bearer') {
+    logger.warn('Authentication rejected: non-Bearer authorization scheme');
+    res.setHeader('WWW-Authenticate', 'Bearer');
+    res.status(401).json({
+      error: 'Unauthorized',
+      message: 'Bearer token required',
+    });
+    return;
+  }
+
   await authMiddleware(req, res, next);
 }
 

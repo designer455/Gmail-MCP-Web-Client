@@ -382,6 +382,85 @@ describe('Phase 4 — Authentication Hardening Tests', () => {
     expect(res.headers.get('www-authenticate')).toContain('Bearer');
   });
 
+  // 18b. Protected `/mcp` rejects non-Bearer schemes, bare Bearer, and malformed Bearer tokens with HTTP 401
+  it('18b. Protected /mcp strictly enforces Bearer scheme and rejects non-Bearer schemes with HTTP 401', async () => {
+    const testCases = [
+      { scheme: 'Basic test-token', expectedMsg: 'Bearer token required' },
+      { scheme: 'Token test-token', expectedMsg: 'Bearer token required' },
+      { scheme: 'Digest test-token', expectedMsg: 'Bearer token required' },
+      { scheme: 'Custom test-token', expectedMsg: 'Bearer token required' },
+    ];
+
+    for (const { scheme, expectedMsg } of testCases) {
+      const res = await fetch(PROTECTED_MCP_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json, text/event-stream',
+          Authorization: scheme,
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          id: 181,
+          method: 'tools/call',
+          params: { name: 'gmail_mcp_status', arguments: {} },
+        }),
+      });
+
+      expect(res.status).toBe(401);
+      expect(res.headers.get('www-authenticate')).toBe('Bearer');
+      const body = await res.json();
+      expect(body.error).toBe('Unauthorized');
+      expect(body.message).toBe(expectedMsg);
+      // Ensure token contents are never leaked in the error response
+      expect(JSON.stringify(body)).not.toContain('test-token');
+    }
+
+    // Bare Bearer header with no token
+    const bareBearerRes = await fetch(PROTECTED_MCP_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 182,
+        method: 'tools/call',
+        params: { name: 'gmail_mcp_status', arguments: {} },
+      }),
+    });
+
+    expect(bareBearerRes.status).toBe(401);
+    expect(bareBearerRes.headers.get('www-authenticate')).toContain('Bearer');
+    const bareBody = await bareBearerRes.json();
+    expect(bareBody.error).toBe('Unauthorized');
+    expect(bareBody.message).toContain('Missing or empty Bearer token');
+
+    // Bearer header with malformed JWT
+    const malformedBearerRes = await fetch(PROTECTED_MCP_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json, text/event-stream',
+        Authorization: 'Bearer malformed.jwt.token',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 183,
+        method: 'tools/call',
+        params: { name: 'gmail_mcp_status', arguments: {} },
+      }),
+    });
+
+    expect(malformedBearerRes.status).toBe(401);
+    expect(malformedBearerRes.headers.get('www-authenticate')).toContain('Bearer');
+    const malformedBody = await malformedBearerRes.json();
+    expect(malformedBody.error).toBe('Unauthorized');
+    expect(JSON.stringify(malformedBody)).not.toContain('malformed.jwt.token');
+  });
+
   // 19. Authenticated `/mcp` reaches MCP execution
   it('19. Authenticated /mcp with valid JWT reaches MCP execution and returns HTTP 200', async () => {
     const token = await createTestJwt({ sub: 'protected-user-19' });
