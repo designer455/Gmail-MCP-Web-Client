@@ -149,32 +149,37 @@ export async function getAttachment(
 }
 
 /**
- * Searches messages that have attachments, optionally filtered by filename or type.
+ * Searches messages that have attachments, optionally filtered by keyword, filename, or type.
  */
 export async function searchAttachments(options?: {
+  query?: string;
   filename?: string;
   mimeType?: string;
   maxResults?: number;
   pageToken?: string;
 }): Promise<ListMessagesResult> {
-  let query = 'has:attachment';
+  let q = 'has:attachment';
+  if (options?.query) {
+    q += ` ${options.query}`;
+  }
   if (options?.filename) {
-    query += ` filename:${options.filename}`;
+    q += ` filename:${options.filename}`;
   }
   if (options?.mimeType) {
     // Map common mime types to Gmail query terms
-    if (options.mimeType.includes('pdf')) query += ' filename:pdf';
+    if (options.mimeType.includes('pdf')) q += ' filename:pdf';
     else if (options.mimeType.includes('image'))
-      query += ' filename:(jpg OR jpeg OR png OR gif OR webp)';
-    else if (options.mimeType.includes('zip')) query += ' filename:(zip OR gz OR tar)';
-    else if (options.mimeType.includes('word')) query += ' filename:(doc OR docx)';
+      q += ' filename:(jpg OR jpeg OR png OR gif OR webp)';
+    else if (options.mimeType.includes('zip')) q += ' filename:(zip OR gz OR tar)';
+    else if (options.mimeType.includes('word')) q += ' filename:(doc OR docx)';
     else if (options.mimeType.includes('spreadsheet') || options.mimeType.includes('excel'))
-      query += ' filename:(xls OR xlsx OR csv)';
+      q += ' filename:(xls OR xlsx OR csv)';
   }
 
   return listMessages({
-    q: query,
+    q,
     maxResults: options?.maxResults || 20,
     pageToken: options?.pageToken,
+    includeSpamTrash: true,
   });
 }

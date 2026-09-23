@@ -87,6 +87,18 @@ import {
   FindNewslettersToolInput,
 } from './tools/smart.js';
 import { handleConnectTool } from './tools/connect.js';
+import {
+  handleBatchModifyLabelsTool,
+  handleBatchArchiveTool,
+  handleBatchMarkReadTool,
+  handleBatchMarkUnreadTool,
+  handleBatchTrashTool,
+  BatchModifyLabelsToolInput,
+  BatchArchiveToolInput,
+  BatchMarkReadToolInput,
+  BatchMarkUnreadToolInput,
+  BatchTrashToolInput,
+} from './tools/batch.js';
 import { sanitizeErrorMessage, GmailNotConnectedError } from './utils/errors.js';
 import { logger } from './utils/logger.js';
 import { getCurrentUser } from './auth/session.js';
@@ -117,11 +129,15 @@ export const GMAIL_TOOLS: Tool[] = [
   {
     name: 'gmail_search',
     description:
-      'Search the authenticated user\'s Gmail mailbox using standard Gmail query syntax (e.g. "from:alice@example.com", "subject:invoice", "is:unread").',
+      'Search the authenticated user\'s Gmail mailbox across complete content (Subject, Body, Sender, Recipient, CC/BCC, and Attachments). Supports keywords (e.g. "KreditBee", "Navi", "Loan", "EMI"), operators (e.g. "OR", "AND", "from:...", "has:attachment", "filename:pdf", "in:anywhere"), exact phrases in quotes, and automatic zero-result diagnostics.',
     inputSchema: {
       type: 'object',
       properties: {
-        query: { type: 'string', description: 'Gmail search query syntax' },
+        query: {
+          type: 'string',
+          description:
+            'Gmail search query across subject, body, sender, and attachments (e.g. "KreditBee", "Loan OR EMI", "from:kreditbee.in", "has:attachment statement")',
+        },
         maxResults: {
           type: 'number',
           description: 'Maximum number of messages to return (1-100, default: 20)',
@@ -130,6 +146,12 @@ export const GMAIL_TOOLS: Tool[] = [
         pageToken: {
           type: 'string',
           description: 'Optional pagination token from previous search',
+        },
+        includeSpamTrash: {
+          type: 'boolean',
+          description:
+            'Whether to include Spam and Trash in the search (default: true, ensuring lender, statement, and promotional emails are not missed)',
+          default: true,
         },
       },
       required: ['query'],
@@ -641,17 +663,23 @@ export const GMAIL_TOOLS: Tool[] = [
   {
     name: 'gmail_search_attachments',
     description:
-      'Search for messages that contain attachments, optionally filtered by filename or MIME type.',
+      'Search for messages that contain attachments, optionally filtered by keyword, filename, or MIME type.',
     inputSchema: {
       type: 'object',
       properties: {
+        query: {
+          type: 'string',
+          description:
+            'Optional search keyword (e.g. "KreditBee", "loan statement", "EMI invoice")',
+        },
         filename: {
           type: 'string',
-          description: 'Optional filename or extension to filter (e.g. ".pdf" or "report.pdf")',
+          description:
+            'Optional filename or extension to filter (e.g. ".pdf", "statement.pdf", or "report")',
         },
         mimeType: {
           type: 'string',
-          description: 'Optional MIME type to filter (e.g. "application/pdf")',
+          description: 'Optional MIME type to filter (e.g. "application/pdf", "image/png")',
         },
         maxResults: {
           type: 'number',
@@ -744,6 +772,113 @@ export const GMAIL_TOOLS: Tool[] = [
         },
         pageToken: { type: 'string', description: 'Pagination token' },
       },
+      additionalProperties: false,
+    },
+  },
+
+  // ── BATCH OPERATIONS ────────────────────────────────────────────────────────
+  {
+    name: 'gmail_batch_modify_labels',
+    description:
+      'Modify labels on multiple messages in bulk using atomic Gmail batchModify API. Supports adding/removing labels by friendly name (e.g. "Loans", auto-created if missing) or label ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        messageIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of Gmail message IDs to modify',
+        },
+        addLabelNames: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'Array of label names to add (e.g. ["Loans", "Bank"]). Auto-created if needed.',
+        },
+        addLabelIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of exact Gmail label IDs to add (e.g. ["STARRED", "Label_123"])',
+        },
+        removeLabelNames: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of label names to remove',
+        },
+        removeLabelIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of exact Gmail label IDs to remove (e.g. ["INBOX", "UNREAD"])',
+        },
+      },
+      required: ['messageIds'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'gmail_batch_archive',
+    description:
+      'Archive multiple messages in bulk (removes INBOX label from all specified message IDs atomically).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        messageIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of Gmail message IDs to archive',
+        },
+      },
+      required: ['messageIds'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'gmail_batch_mark_read',
+    description:
+      'Mark multiple messages as read in bulk (removes UNREAD label from all specified message IDs atomically).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        messageIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of Gmail message IDs to mark as read',
+        },
+      },
+      required: ['messageIds'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'gmail_batch_mark_unread',
+    description:
+      'Mark multiple messages as unread in bulk (adds UNREAD label to all specified message IDs atomically).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        messageIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of Gmail message IDs to mark as unread',
+        },
+      },
+      required: ['messageIds'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'gmail_batch_trash',
+    description: 'Move multiple messages to Trash in bulk concurrently.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        messageIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of Gmail message IDs to move to Trash',
+        },
+      },
+      required: ['messageIds'],
       additionalProperties: false,
     },
   },
@@ -909,6 +1044,25 @@ export function createMcpServer(): Server {
           break;
         case 'gmail_find_newsletters':
           resultData = await handleFindNewslettersTool(args as unknown as FindNewslettersToolInput);
+          break;
+
+        // BATCH
+        case 'gmail_batch_modify_labels':
+          resultData = await handleBatchModifyLabelsTool(
+            args as unknown as BatchModifyLabelsToolInput
+          );
+          break;
+        case 'gmail_batch_archive':
+          resultData = await handleBatchArchiveTool(args as unknown as BatchArchiveToolInput);
+          break;
+        case 'gmail_batch_mark_read':
+          resultData = await handleBatchMarkReadTool(args as unknown as BatchMarkReadToolInput);
+          break;
+        case 'gmail_batch_mark_unread':
+          resultData = await handleBatchMarkUnreadTool(args as unknown as BatchMarkUnreadToolInput);
+          break;
+        case 'gmail_batch_trash':
+          resultData = await handleBatchTrashTool(args as unknown as BatchTrashToolInput);
           break;
 
         default:

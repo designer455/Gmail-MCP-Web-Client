@@ -1,6 +1,6 @@
 import { gmail_v1 } from 'googleapis';
 import { GmailClientService } from './client.js';
-import { GmailApiError, NotFoundError } from '../utils/errors.js';
+import { GmailApiError, NotFoundError, ValidationError } from '../utils/errors.js';
 import { logger } from '../utils/logger.js';
 
 export interface MessageSummary {
@@ -33,10 +33,20 @@ export interface FullMessageDetail {
   attachments: AttachmentMetadata[];
 }
 
+export interface SearchDiagnostics {
+  status: 'results_found' | 'zero_results';
+  query: string;
+  includeSpamTrash: boolean;
+  resultSizeEstimate: number;
+  explanation?: string;
+  suggestions?: string[];
+}
+
 export interface ListMessagesResult {
   messages: MessageSummary[];
   nextPageToken?: string;
   resultSizeEstimate?: number;
+  diagnostics?: SearchDiagnostics;
 }
 
 /**
@@ -136,6 +146,7 @@ export async function listMessages(options?: {
   pageToken?: string;
   labelIds?: string[];
   q?: string;
+  includeSpamTrash?: boolean;
 }): Promise<ListMessagesResult> {
   const { gmail, userId } = await GmailClientService.getClient();
 
@@ -146,44 +157,87 @@ export async function listMessages(options?: {
       pageToken: options?.pageToken || undefined,
       labelIds: options?.labelIds || undefined,
       q: options?.q || undefined,
+      includeSpamTrash: options?.includeSpamTrash ?? true,
     });
 
     const rawList = listRes.data.messages || [];
     const nextPageToken = listRes.data.nextPageToken || undefined;
-    const resultSizeEstimate = listRes.data.resultSizeEstimate || undefined;
+    const resultSizeEstimate = listRes.data.resultSizeEstimate ?? rawList.length;
 
-    // Fetch message summaries in batches (up to 20 for performance)
+    // Fetch message summaries concurrently in chunks to prevent serverless timeouts
+    const targetItems = rawList.slice(0, options?.maxResults || 20);
     const summaries: MessageSummary[] = [];
-    for (const item of rawList.slice(0, options?.maxResults || 20)) {
-      if (!item.id) continue;
-      try {
-        const detailRes = await gmail.users.messages.get({
-          userId: 'me',
-          id: item.id,
-          format: 'metadata',
-          metadataHeaders: ['Subject', 'From', 'To', 'Date'],
-        });
-        summaries.push(parseMessageSummary(detailRes.data));
-      } catch (e) {
-        logger.debug(`Could not fetch metadata for message ${item.id}: ${e}`);
-        summaries.push({
-          messageId: item.id,
-          threadId: item.threadId || '',
-          subject: '(Metadata unavailable)',
-          sender: '',
-          recipients: '',
-          date: '',
-          snippet: '',
-        });
+    const chunkSize = 10;
+
+    for (let i = 0; i < targetItems.length; i += chunkSize) {
+      const chunk = targetItems.slice(i, i + chunkSize);
+      const chunkSummaries = await Promise.all(
+        chunk.map(async (item) => {
+          if (!item.id) return null;
+          try {
+            const detailRes = await gmail.users.messages.get({
+              userId: 'me',
+              id: item.id,
+              format: 'metadata',
+              metadataHeaders: ['Subject', 'From', 'To', 'Date'],
+            });
+            return parseMessageSummary(detailRes.data);
+          } catch (e) {
+            logger.debug(`Could not fetch metadata for message ${item.id}: ${e}`);
+            return {
+              messageId: item.id,
+              threadId: item.threadId || '',
+              subject: '(Metadata unavailable)',
+              sender: '',
+              recipients: '',
+              date: '',
+              snippet: '',
+            };
+          }
+        })
+      );
+      for (const s of chunkSummaries) {
+        if (s) summaries.push(s);
       }
     }
 
-    logger.info(`Retrieved ${summaries.length} messages for user [${userId}]`);
+    // Diagnostics for searches, especially when 0 results are returned
+    let diagnostics: SearchDiagnostics | undefined;
+    if (options?.q) {
+      if (summaries.length === 0) {
+        diagnostics = {
+          status: 'zero_results',
+          query: options.q,
+          includeSpamTrash: options?.includeSpamTrash ?? true,
+          resultSizeEstimate: resultSizeEstimate || 0,
+          explanation: `Gmail returned 0 messages matching query "${options.q}". Server-side search checked subject, body, sender, recipient, and attachment metadata.`,
+          suggestions: [
+            `Try searching with broader terms or OR syntax (e.g. "KreditBee OR Krazybee OR Navi OR Loan")`,
+            `Use the "in:anywhere" operator to include all folders, archived mail, and spam: "in:anywhere ${options.q}"`,
+            `Check sender email domains directly (e.g. "from:kreditbee.in" or "from:navi.com")`,
+            `If looking for statements or receipts, try: "has:attachment ${options.q}" or "filename:pdf ${options.q}"`,
+            `Verify lender spelling or check for legal corporate entity names on the invoice/loan agreement.`,
+          ],
+        };
+      } else {
+        diagnostics = {
+          status: 'results_found',
+          query: options.q,
+          includeSpamTrash: options?.includeSpamTrash ?? true,
+          resultSizeEstimate: resultSizeEstimate || summaries.length,
+        };
+      }
+    }
+
+    logger.info(
+      `Retrieved ${summaries.length} messages for user [${userId}] (query: "${options?.q || 'none'}")`
+    );
 
     return {
       messages: summaries,
       nextPageToken,
       resultSizeEstimate,
+      diagnostics,
     };
   } catch (error: unknown) {
     logger.error(`Error listing messages for user [${userId}]: ${error}`);
@@ -192,17 +246,20 @@ export async function listMessages(options?: {
 }
 
 /**
- * Searches messages using Gmail query syntax (from:, subject:, is:unread, etc.)
+ * Searches messages across full content (subject, body, sender, recipient, attachments)
+ * using Gmail query syntax with pagination and spam/trash inclusion.
  */
 export async function searchMessages(
   query: string,
   maxResults = 20,
-  pageToken?: string
+  pageToken?: string,
+  includeSpamTrash = true
 ): Promise<ListMessagesResult> {
   return listMessages({
     q: query,
     maxResults,
     pageToken,
+    includeSpamTrash,
   });
 }
 
@@ -397,4 +454,128 @@ export async function deleteMessagePermanently(
     );
     throw new GmailApiError(`Failed to permanently delete message "${messageId}".`);
   }
+}
+
+export interface BatchModifyResult {
+  success: boolean;
+  processedCount: number;
+  messageIds: string[];
+}
+
+/**
+ * Modifies labels for a batch of messages in bulk using Gmail's batchModify API.
+ * Supports up to 1000 messages per chunk according to Gmail API limits.
+ */
+export async function batchModifyMessages(options: {
+  messageIds: string[];
+  addLabelIds?: string[];
+  removeLabelIds?: string[];
+}): Promise<BatchModifyResult> {
+  const { messageIds, addLabelIds = [], removeLabelIds = [] } = options;
+
+  if (!messageIds || messageIds.length === 0) {
+    throw new ValidationError('At least one message ID is required for batch operations.');
+  }
+
+  const { gmail, userId } = await GmailClientService.getClient();
+
+  // Deduplicate and filter empty IDs
+  const uniqueIds = Array.from(new Set(messageIds.filter(Boolean)));
+  const chunkSize = 500; // Chunk into groups of 500 (Gmail API max is 1000)
+
+  let processedCount = 0;
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize);
+    try {
+      await gmail.users.messages.batchModify({
+        userId: 'me',
+        requestBody: {
+          ids: chunk,
+          addLabelIds,
+          removeLabelIds,
+        },
+      });
+      processedCount += chunk.length;
+      logger.info(
+        `Batch modified ${chunk.length} messages (${processedCount}/${uniqueIds.length}) for user [${userId}]`
+      );
+    } catch (error: unknown) {
+      logger.error(
+        `Error during batch modify chunk (${i} to ${i + chunk.length}) for user [${userId}]: ${error}`
+      );
+      throw new GmailApiError(
+        `Failed to batch modify messages: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
+    }
+  }
+
+  return {
+    success: true,
+    processedCount,
+    messageIds: uniqueIds,
+  };
+}
+
+/**
+ * Batch archives messages by removing the INBOX label in bulk.
+ */
+export async function batchArchiveMessages(messageIds: string[]): Promise<BatchModifyResult> {
+  return batchModifyMessages({
+    messageIds,
+    removeLabelIds: ['INBOX'],
+  });
+}
+
+/**
+ * Batch marks messages as read by removing UNREAD label in bulk.
+ */
+export async function batchMarkReadMessages(messageIds: string[]): Promise<BatchModifyResult> {
+  return batchModifyMessages({
+    messageIds,
+    removeLabelIds: ['UNREAD'],
+  });
+}
+
+/**
+ * Batch marks messages as unread by adding UNREAD label in bulk.
+ */
+export async function batchMarkUnreadMessages(messageIds: string[]): Promise<BatchModifyResult> {
+  return batchModifyMessages({
+    messageIds,
+    addLabelIds: ['UNREAD'],
+  });
+}
+
+/**
+ * Batch trashes messages concurrently in chunks.
+ */
+export async function batchTrashMessages(messageIds: string[]): Promise<BatchModifyResult> {
+  if (!messageIds || messageIds.length === 0) {
+    throw new ValidationError('At least one message ID is required for batch trash.');
+  }
+
+  const { gmail, userId } = await GmailClientService.getClient();
+  const uniqueIds = Array.from(new Set(messageIds.filter(Boolean)));
+  const chunkSize = 15;
+
+  let processedCount = 0;
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize);
+    await Promise.all(
+      chunk.map(async (id) => {
+        try {
+          await gmail.users.messages.trash({ userId: 'me', id });
+          processedCount++;
+        } catch (e) {
+          logger.warn(`Failed to trash message [${id}] in batch for user [${userId}]: ${e}`);
+        }
+      })
+    );
+  }
+
+  return {
+    success: true,
+    processedCount,
+    messageIds: uniqueIds,
+  };
 }

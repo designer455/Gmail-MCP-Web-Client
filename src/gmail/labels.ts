@@ -34,6 +34,21 @@ export interface UpdateLabelOptions {
 }
 
 /**
+ * System label IDs recognized by Gmail API
+ */
+const SYSTEM_LABELS: Record<string, string> = {
+  INBOX: 'INBOX',
+  SPAM: 'SPAM',
+  TRASH: 'TRASH',
+  UNREAD: 'UNREAD',
+  STARRED: 'STARRED',
+  IMPORTANT: 'IMPORTANT',
+  SENT: 'SENT',
+  DRAFT: 'DRAFT',
+  CHAT: 'CHAT',
+};
+
+/**
  * Lists all labels in the authenticated user's mailbox.
  */
 export async function listLabels(): Promise<GmailLabel[]> {
@@ -44,28 +59,37 @@ export async function listLabels(): Promise<GmailLabel[]> {
     const rawLabels = response.data.labels || [];
 
     const labels: GmailLabel[] = [];
-    for (const raw of rawLabels) {
-      if (!raw.id) continue;
-      try {
-        const detail = await gmail.users.labels.get({ userId: 'me', id: raw.id });
-        const d = detail.data;
-        labels.push({
-          id: d.id || '',
-          name: d.name || '',
-          type: d.type || 'user',
-          messagesTotal: d.messagesTotal || undefined,
-          messagesUnread: d.messagesUnread || undefined,
-          threadsTotal: d.threadsTotal || undefined,
-          threadsUnread: d.threadsUnread || undefined,
-          color: d.color
-            ? {
-                textColor: d.color.textColor || undefined,
-                backgroundColor: d.color.backgroundColor || undefined,
-              }
-            : undefined,
-        });
-      } catch {
-        labels.push({ id: raw.id, name: raw.name || '', type: raw.type || 'user' });
+    const chunkSize = 10;
+    for (let i = 0; i < rawLabels.length; i += chunkSize) {
+      const chunk = rawLabels.slice(i, i + chunkSize);
+      const chunkResults = await Promise.all(
+        chunk.map(async (raw) => {
+          if (!raw.id) return null;
+          try {
+            const detail = await gmail.users.labels.get({ userId: 'me', id: raw.id });
+            const d = detail.data;
+            return {
+              id: d.id || '',
+              name: d.name || '',
+              type: d.type || 'user',
+              messagesTotal: d.messagesTotal || undefined,
+              messagesUnread: d.messagesUnread || undefined,
+              threadsTotal: d.threadsTotal || undefined,
+              threadsUnread: d.threadsUnread || undefined,
+              color: d.color
+                ? {
+                    textColor: d.color.textColor || undefined,
+                    backgroundColor: d.color.backgroundColor || undefined,
+                  }
+                : undefined,
+            } as GmailLabel;
+          } catch {
+            return { id: raw.id, name: raw.name || '', type: raw.type || 'user' } as GmailLabel;
+          }
+        })
+      );
+      for (const res of chunkResults) {
+        if (res) labels.push(res);
       }
     }
 
@@ -74,6 +98,58 @@ export async function listLabels(): Promise<GmailLabel[]> {
   } catch (error: unknown) {
     logger.error(`Error listing labels for user [${userId}]: ${error}`);
     throw new GmailApiError('Failed to list Gmail labels.');
+  }
+}
+
+/**
+ * Resolves a label name or ID to an existing label ID, creating the label if it does not exist.
+ */
+export async function getOrCreateLabelByName(nameOrId: string): Promise<string> {
+  const trimmed = nameOrId.trim();
+  if (!trimmed) {
+    throw new ValidationError('Label name or ID is required.');
+  }
+
+  const upper = trimmed.toUpperCase();
+  if (SYSTEM_LABELS[upper]) {
+    return SYSTEM_LABELS[upper];
+  }
+
+  const { gmail, userId } = await GmailClientService.getClient();
+
+  try {
+    const listRes = await gmail.users.labels.list({ userId: 'me' });
+    const existing = listRes.data.labels || [];
+    const found = existing.find(
+      (l) =>
+        l.name?.toLowerCase() === trimmed.toLowerCase() ||
+        l.id?.toLowerCase() === trimmed.toLowerCase()
+    );
+
+    if (found?.id) {
+      return found.id;
+    }
+
+    // Auto-create user label if not found
+    const createRes = await gmail.users.labels.create({
+      userId: 'me',
+      requestBody: {
+        name: trimmed,
+        labelListVisibility: 'labelShow',
+        messageListVisibility: 'show',
+      },
+    });
+
+    if (!createRes.data.id) {
+      throw new GmailApiError(`Failed to create label "${trimmed}".`);
+    }
+
+    logger.info(`Auto-created label [${trimmed}] (ID: ${createRes.data.id}) for user [${userId}]`);
+    return createRes.data.id;
+  } catch (error: unknown) {
+    if (error instanceof ValidationError || error instanceof GmailApiError) throw error;
+    logger.error(`Error finding or creating label [${trimmed}] for user [${userId}]: ${error}`);
+    throw new GmailApiError(`Failed to resolve label "${trimmed}".`);
   }
 }
 

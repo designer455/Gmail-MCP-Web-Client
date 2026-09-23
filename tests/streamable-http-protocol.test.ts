@@ -102,7 +102,7 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
     await client.connect(transport);
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(39);
+    expect(tools.length).toBe(44);
     const toolNames = tools.map((t) => t.name);
     // Connection & Status
     expect(toolNames).toContain('gmail_connect');
@@ -145,6 +145,12 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
     expect(toolNames).toContain('gmail_classify_email');
     expect(toolNames).toContain('gmail_extract_actions');
     expect(toolNames).toContain('gmail_find_newsletters');
+    // Batch tools
+    expect(toolNames).toContain('gmail_batch_modify_labels');
+    expect(toolNames).toContain('gmail_batch_archive');
+    expect(toolNames).toContain('gmail_batch_mark_read');
+    expect(toolNames).toContain('gmail_batch_mark_unread');
+    expect(toolNames).toContain('gmail_batch_trash');
 
     // Verify none of the tools allow arbitrary user_id or account selection in schema
     for (const tool of tools) {

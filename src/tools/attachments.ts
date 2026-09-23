@@ -28,10 +28,18 @@ export const getAttachmentToolSchema = z.object({
 });
 
 export const searchAttachmentsToolSchema = z.object({
+  query: z
+    .string()
+    .optional()
+    .describe(
+      'Optional search keyword (e.g. "KreditBee", "loan statement", "EMI invoice") to search alongside attachments'
+    ),
   filename: z
     .string()
     .optional()
-    .describe('Optional filename or extension to search for (e.g. "report.pdf" or ".pdf")'),
+    .describe(
+      'Optional filename or extension to search for (e.g. "statement.pdf", "loan_statement", or ".pdf")'
+    ),
   mimeType: z
     .string()
     .optional()
@@ -72,6 +80,7 @@ export async function handleSearchAttachmentsTool(
 ): Promise<ListMessagesResult> {
   const v = searchAttachmentsToolSchema.parse(input);
   return searchAttachments({
+    query: v.query,
     filename: v.filename,
     mimeType: v.mimeType,
     maxResults: v.maxResults,
