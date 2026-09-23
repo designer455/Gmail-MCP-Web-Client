@@ -124,3 +124,164 @@ export async function sendEmail(options: SendEmailOptions): Promise<SendEmailRes
     throw new GmailApiError('Failed to send email through Gmail API.');
   }
 }
+
+/**
+ * Replies to an existing message/thread. Automatically sets threadId, In-Reply-To, References,
+ * and prepends "Re: " to the subject if not already present.
+ */
+export async function replyToMessage(
+  messageId: string,
+  options: Omit<SendEmailOptions, 'threadId' | 'inReplyTo'>
+): Promise<SendEmailResult> {
+  const { gmail, userId, emailAddress } = await GmailClientService.getClient();
+
+  if (!options.to || (Array.isArray(options.to) && options.to.length === 0)) {
+    throw new ValidationError('Reply recipient "to" is required.');
+  }
+
+  try {
+    // Fetch the original message for thread metadata
+    const origRes = await gmail.users.messages.get({
+      userId: 'me',
+      id: messageId,
+      format: 'metadata',
+      metadataHeaders: ['Subject', 'Message-ID', 'References', 'From'],
+    });
+
+    const orig = origRes.data;
+    const headers = orig.payload?.headers || [];
+    const getH = (name: string) =>
+      headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
+
+    const origMessageId = getH('Message-ID');
+    const origReferences = getH('References');
+    const origSubject = getH('Subject');
+
+    const replySubject =
+      options.subject ||
+      (origSubject.toLowerCase().startsWith('re:') ? origSubject : `Re: ${origSubject}`);
+
+    const references = origReferences ? `${origReferences} ${origMessageId}`.trim() : origMessageId;
+
+    const sendOptions: SendEmailOptions = {
+      ...options,
+      subject: replySubject,
+      threadId: orig.threadId || undefined,
+      inReplyTo: origMessageId || undefined,
+      references: references || undefined,
+    };
+
+    const raw = composeRawEmail(sendOptions, emailAddress);
+
+    const response = await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: {
+        raw,
+        threadId: orig.threadId || undefined,
+      },
+    });
+
+    const sentId = response.data.id || '';
+    const sentThreadId = response.data.threadId || '';
+    logger.info(`Replied to message [${messageId}] as [${sentId}] for user [${userId}]`);
+
+    return { success: true, messageId: sentId, threadId: sentThreadId };
+  } catch (error: unknown) {
+    if (error instanceof ValidationError) throw error;
+    logger.error(`Error replying to message [${messageId}] for user [${userId}]: ${error}`);
+    throw new GmailApiError('Failed to send reply through Gmail API.');
+  }
+}
+
+/**
+ * Forwards a message to new recipients, quoting the original body.
+ */
+export async function forwardMessage(
+  messageId: string,
+  to: string | string[],
+  additionalBody?: string
+): Promise<SendEmailResult> {
+  const { gmail, userId, emailAddress } = await GmailClientService.getClient();
+
+  try {
+    const origRes = await gmail.users.messages.get({
+      userId: 'me',
+      id: messageId,
+      format: 'full',
+    });
+
+    const orig = origRes.data;
+    const headers = orig.payload?.headers || [];
+    const getH = (name: string) =>
+      headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value || '';
+
+    const origSubject = getH('Subject');
+    const origFrom = getH('From');
+    const origDate = getH('Date');
+    const origTo = getH('To');
+
+    // Extract original body text
+    let origBody = '';
+    function extractBody(
+      part:
+        | {
+            mimeType?: string | null;
+            body?: { data?: string | null } | null;
+            parts?: (typeof part)[] | null;
+          }
+        | null
+        | undefined
+    ): void {
+      if (!part) return;
+      if (part.mimeType === 'text/plain' && part.body?.data) {
+        origBody = Buffer.from(part.body.data, 'base64url').toString('utf8');
+        return;
+      }
+      for (const sub of part.parts || []) {
+        extractBody(sub);
+      }
+    }
+    extractBody(orig.payload);
+
+    const fwdSubject = origSubject.toLowerCase().startsWith('fwd:')
+      ? origSubject
+      : `Fwd: ${origSubject}`;
+
+    const forwardedBody = [
+      additionalBody || '',
+      '',
+      '---------- Forwarded message ---------',
+      `From: ${origFrom}`,
+      `Date: ${origDate}`,
+      `Subject: ${origSubject}`,
+      `To: ${origTo}`,
+      '',
+      origBody,
+    ]
+      .join('\n')
+      .trim();
+
+    const sendOptions: SendEmailOptions = {
+      to,
+      subject: fwdSubject,
+      body: forwardedBody,
+    };
+
+    const raw = composeRawEmail(sendOptions, emailAddress);
+
+    const response = await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: { raw },
+    });
+
+    const sentId = response.data.id || '';
+    const sentThreadId = response.data.threadId || '';
+    logger.info(`Forwarded message [${messageId}] as [${sentId}] for user [${userId}]`);
+
+    return { success: true, messageId: sentId, threadId: sentThreadId };
+  } catch (error: unknown) {
+    if (error instanceof ValidationError) throw error;
+    logger.error(`Error forwarding message [${messageId}] for user [${userId}]: ${error}`);
+    throw new GmailApiError('Failed to forward message through Gmail API.');
+  }
+}

@@ -102,8 +102,9 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
     await client.connect(transport);
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(7);
+    expect(tools.length).toBe(38);
     const toolNames = tools.map((t) => t.name);
+    // Original 7
     expect(toolNames).toContain('gmail_mcp_status');
     expect(toolNames).toContain('gmail_get_profile');
     expect(toolNames).toContain('gmail_search');
@@ -111,6 +112,38 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
     expect(toolNames).toContain('gmail_get_message');
     expect(toolNames).toContain('gmail_get_thread');
     expect(toolNames).toContain('gmail_send');
+    // New tools
+    expect(toolNames).toContain('gmail_reply');
+    expect(toolNames).toContain('gmail_forward');
+    expect(toolNames).toContain('gmail_create_draft');
+    expect(toolNames).toContain('gmail_update_draft');
+    expect(toolNames).toContain('gmail_delete_draft');
+    expect(toolNames).toContain('gmail_send_draft');
+    expect(toolNames).toContain('gmail_list_threads');
+    expect(toolNames).toContain('gmail_list_labels');
+    expect(toolNames).toContain('gmail_create_label');
+    expect(toolNames).toContain('gmail_update_label');
+    expect(toolNames).toContain('gmail_delete_label');
+    expect(toolNames).toContain('gmail_add_label');
+    expect(toolNames).toContain('gmail_remove_label');
+    expect(toolNames).toContain('gmail_move_message');
+    expect(toolNames).toContain('gmail_archive');
+    expect(toolNames).toContain('gmail_mark_read');
+    expect(toolNames).toContain('gmail_mark_unread');
+    expect(toolNames).toContain('gmail_star');
+    expect(toolNames).toContain('gmail_unstar');
+    expect(toolNames).toContain('gmail_snooze');
+    expect(toolNames).toContain('gmail_trash');
+    expect(toolNames).toContain('gmail_restore');
+    expect(toolNames).toContain('gmail_delete_permanently');
+    expect(toolNames).toContain('gmail_list_attachments');
+    expect(toolNames).toContain('gmail_get_attachment');
+    expect(toolNames).toContain('gmail_search_attachments');
+    expect(toolNames).toContain('gmail_summarize_thread');
+    expect(toolNames).toContain('gmail_generate_reply');
+    expect(toolNames).toContain('gmail_classify_email');
+    expect(toolNames).toContain('gmail_extract_actions');
+    expect(toolNames).toContain('gmail_find_newsletters');
 
     // Verify none of the tools allow arbitrary user_id or account selection in schema
     for (const tool of tools) {

@@ -53,3 +53,55 @@ export async function getThread(threadId: string): Promise<GmailThreadDetail> {
     throw new GmailApiError(`Failed to fetch thread with ID "${threadId}".`);
   }
 }
+
+export interface ListThreadsResult {
+  threads: ThreadSummary[];
+  nextPageToken?: string;
+  resultSizeEstimate?: number;
+}
+
+export interface ThreadSummary {
+  threadId: string;
+  snippet: string;
+  historyId?: string;
+}
+
+/**
+ * Lists threads in the authenticated user's mailbox.
+ */
+export async function listThreads(options?: {
+  maxResults?: number;
+  pageToken?: string;
+  labelIds?: string[];
+  q?: string;
+}): Promise<ListThreadsResult> {
+  const { gmail, userId } = await GmailClientService.getClient();
+
+  try {
+    const response = await gmail.users.threads.list({
+      userId: 'me',
+      maxResults: options?.maxResults || 20,
+      pageToken: options?.pageToken || undefined,
+      labelIds: options?.labelIds || undefined,
+      q: options?.q || undefined,
+    });
+
+    const rawThreads = response.data.threads || [];
+    const threads: ThreadSummary[] = rawThreads.map((t) => ({
+      threadId: t.id || '',
+      snippet: t.snippet || '',
+      historyId: t.historyId || undefined,
+    }));
+
+    logger.info(`Listed ${threads.length} threads for user [${userId}]`);
+
+    return {
+      threads,
+      nextPageToken: response.data.nextPageToken || undefined,
+      resultSizeEstimate: response.data.resultSizeEstimate || undefined,
+    };
+  } catch (error: unknown) {
+    logger.error(`Error listing threads for user [${userId}]: ${error}`);
+    throw new GmailApiError('Failed to list Gmail threads.');
+  }
+}

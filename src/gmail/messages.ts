@@ -259,3 +259,142 @@ export async function getMessage(messageId: string): Promise<FullMessageDetail> 
     throw new GmailApiError(`Failed to fetch message with ID "${messageId}".`);
   }
 }
+
+/**
+ * Modifies labels on a message (add/remove).
+ * Used internally by mark read, star, archive, move, etc.
+ */
+export async function modifyMessageLabels(
+  messageId: string,
+  addLabelIds: string[],
+  removeLabelIds: string[]
+): Promise<{ messageId: string; labelIds: string[] }> {
+  if (!messageId) {
+    throw new NotFoundError('Invalid or missing message ID');
+  }
+
+  const { gmail, userId } = await GmailClientService.getClient();
+
+  try {
+    const response = await gmail.users.messages.modify({
+      userId: 'me',
+      id: messageId,
+      requestBody: {
+        addLabelIds,
+        removeLabelIds,
+      },
+    });
+
+    logger.info(`Modified labels on message [${messageId}] for user [${userId}]`);
+    return {
+      messageId: response.data.id || messageId,
+      labelIds: response.data.labelIds || [],
+    };
+  } catch (error: unknown) {
+    logger.error(`Error modifying labels on message [${messageId}] for user [${userId}]: ${error}`);
+    throw new GmailApiError(`Failed to modify labels on message "${messageId}".`);
+  }
+}
+
+/** Mark a message as read (removes UNREAD label). */
+export async function markMessageRead(messageId: string) {
+  return modifyMessageLabels(messageId, [], ['UNREAD']);
+}
+
+/** Mark a message as unread (adds UNREAD label). */
+export async function markMessageUnread(messageId: string) {
+  return modifyMessageLabels(messageId, ['UNREAD'], []);
+}
+
+/** Star a message (adds STARRED label). */
+export async function starMessage(messageId: string) {
+  return modifyMessageLabels(messageId, ['STARRED'], []);
+}
+
+/** Remove star from a message (removes STARRED label). */
+export async function unstarMessage(messageId: string) {
+  return modifyMessageLabels(messageId, [], ['STARRED']);
+}
+
+/** Archive a message (removes INBOX label). */
+export async function archiveMessage(messageId: string) {
+  return modifyMessageLabels(messageId, [], ['INBOX']);
+}
+
+/** Move a message to a different label (removes all inbox-level labels and adds new one). */
+export async function moveMessage(
+  messageId: string,
+  targetLabelId: string,
+  removeFromInbox = true
+): Promise<{ messageId: string; labelIds: string[] }> {
+  const removeIds = removeFromInbox ? ['INBOX'] : [];
+  return modifyMessageLabels(messageId, [targetLabelId], removeIds);
+}
+
+/**
+ * Moves a message to the Trash folder.
+ */
+export async function trashMessage(
+  messageId: string
+): Promise<{ success: boolean; messageId: string }> {
+  if (!messageId) {
+    throw new NotFoundError('Invalid or missing message ID');
+  }
+
+  const { gmail, userId } = await GmailClientService.getClient();
+
+  try {
+    await gmail.users.messages.trash({ userId: 'me', id: messageId });
+    logger.info(`Trashed message [${messageId}] for user [${userId}]`);
+    return { success: true, messageId };
+  } catch (error: unknown) {
+    logger.error(`Error trashing message [${messageId}] for user [${userId}]: ${error}`);
+    throw new GmailApiError(`Failed to trash message "${messageId}".`);
+  }
+}
+
+/**
+ * Restores a message from Trash.
+ */
+export async function restoreMessage(
+  messageId: string
+): Promise<{ success: boolean; messageId: string }> {
+  if (!messageId) {
+    throw new NotFoundError('Invalid or missing message ID');
+  }
+
+  const { gmail, userId } = await GmailClientService.getClient();
+
+  try {
+    await gmail.users.messages.untrash({ userId: 'me', id: messageId });
+    logger.info(`Restored message [${messageId}] from trash for user [${userId}]`);
+    return { success: true, messageId };
+  } catch (error: unknown) {
+    logger.error(`Error restoring message [${messageId}] for user [${userId}]: ${error}`);
+    throw new GmailApiError(`Failed to restore message "${messageId}" from trash.`);
+  }
+}
+
+/**
+ * Permanently deletes a message. This cannot be undone.
+ */
+export async function deleteMessagePermanently(
+  messageId: string
+): Promise<{ success: boolean; messageId: string }> {
+  if (!messageId) {
+    throw new NotFoundError('Invalid or missing message ID');
+  }
+
+  const { gmail, userId } = await GmailClientService.getClient();
+
+  try {
+    await gmail.users.messages.delete({ userId: 'me', id: messageId });
+    logger.info(`Permanently deleted message [${messageId}] for user [${userId}]`);
+    return { success: true, messageId };
+  } catch (error: unknown) {
+    logger.error(
+      `Error permanently deleting message [${messageId}] for user [${userId}]: ${error}`
+    );
+    throw new GmailApiError(`Failed to permanently delete message "${messageId}".`);
+  }
+}
