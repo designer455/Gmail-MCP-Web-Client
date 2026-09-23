@@ -86,13 +86,20 @@ import {
   ExtractActionsToolInput,
   FindNewslettersToolInput,
 } from './tools/smart.js';
+import { handleConnectTool } from './tools/connect.js';
 import { sanitizeErrorMessage, GmailNotConnectedError } from './utils/errors.js';
 import { logger } from './utils/logger.js';
 import { getCurrentUser } from './auth/session.js';
 import { createGoogleLinkToken } from './auth/link-token.js';
 
 export const GMAIL_TOOLS: Tool[] = [
-  // ── STATUS ──────────────────────────────────────────────────────────────────
+  // ── CONNECTION & STATUS ──────────────────────────────────────────────────────
+  {
+    name: 'gmail_connect',
+    description:
+      'Request a one-time, secure Google OAuth connection link to connect your personal Gmail account to this ChatGPT session. If already connected, returns current status.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
   {
     name: 'gmail_mcp_status',
     description:
@@ -763,7 +770,10 @@ export function createMcpServer(): Server {
       let resultData: unknown;
 
       switch (name) {
-        // STATUS
+        // CONNECTION & STATUS
+        case 'gmail_connect':
+          resultData = await handleConnectTool();
+          break;
         case 'gmail_mcp_status':
           resultData = await handleStatusTool();
           break;
@@ -914,13 +924,14 @@ export function createMcpServer(): Server {
     } catch (error: unknown) {
       if (error instanceof GmailNotConnectedError) {
         const user = getCurrentUser();
-        let message = 'Gmail account is not connected. Please complete Google OAuth.';
+        let message =
+          'Gmail account is not connected. Please complete Google OAuth. Call gmail_connect to get a one-time Gmail connection link.';
         if (user.isAuthenticated && user.userId !== 'anonymous') {
           try {
             const linkUrl = createGoogleLinkToken(user.userId);
-            message = `Gmail account is not connected. Please complete Google OAuth.\nOpen this one-time link to connect your Google account:\n${linkUrl}\n\nThis link connects your personal Google account to your ChatGPT MCP session. It expires in 10 minutes and can only be used once.`;
+            message = `Gmail account is not connected. Please complete Google OAuth.\nCall gmail_connect to get a one-time Gmail connection link, or open this one-time link to connect your Google account:\n${linkUrl}\n\nThis link connects your personal Google account to your ChatGPT MCP session. It expires in 10 minutes and can only be used once.`;
           } catch (tokenErr) {
-            message = `Gmail account is not connected. Please complete Google OAuth. Failed to generate secure link: ${sanitizeErrorMessage(tokenErr)}`;
+            message = `Gmail account is not connected. Please complete Google OAuth. Call gmail_connect to get a one-time Gmail connection link. (Failed to generate link: ${sanitizeErrorMessage(tokenErr)})`;
           }
         }
         logger.warn(`MCP tool [${name}] returned connection notice`);

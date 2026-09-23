@@ -102,9 +102,10 @@ describe('Streamable HTTP Protocol Audit & Verification Tests', () => {
     await client.connect(transport);
     const { tools } = await client.listTools();
 
-    expect(tools.length).toBe(38);
+    expect(tools.length).toBe(39);
     const toolNames = tools.map((t) => t.name);
-    // Original 7
+    // Connection & Status
+    expect(toolNames).toContain('gmail_connect');
     expect(toolNames).toContain('gmail_mcp_status');
     expect(toolNames).toContain('gmail_get_profile');
     expect(toolNames).toContain('gmail_search');
